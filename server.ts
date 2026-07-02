@@ -19,14 +19,15 @@ import {
   updateLicenseHWID, updateLicenseLastActive,
   getSystemConfig, setSystemConfig,
   getUserWithPasswordByEmail, updateLastLogin,
-  saveRecoveryCode, getRecoveryCode, deleteRecoveryCode, updateUserPassword
+  saveRecoveryCode, getRecoveryCode, deleteRecoveryCode, updateUserPassword,
+  checkSQLiteHealth
 } from "./src/db";
 import { License, AppUser, AuditLog } from "./src/types";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
 import { execSync } from "child_process";
-import { initializeDuckDBSchema, calculateDuckDBRiskScores } from "./src/analytics";
+import { initializeDuckDBSchema, calculateDuckDBRiskScores, checkDuckDBHealth } from "./src/analytics";
 
 async function startServer() {
   await initializeDuckDBSchema();
@@ -813,6 +814,21 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  app.get("/api/diagnostics/db-health", async (req, res) => {
+    try {
+      const sqliteHealth = checkSQLiteHealth();
+      const duckdbHealth = await checkDuckDBHealth();
+      
+      res.json({
+        sqlite: sqliteHealth,
+        duckdb: duckdbHealth,
+        timestamp: new Date().toISOString()
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
     
@@ -863,6 +879,7 @@ async function startServer() {
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 mins expiry
       
       saveRecoveryCode(email, code, expiresAt);
+      console.log(`[AUTH] Recovery PIN generated for ${email}: ${code}`);
 
       logAction(
         { id: user.id, name: user.name } as any, 
@@ -873,11 +890,11 @@ async function startServer() {
       );
 
       const smtpSettings = getSMTPSettings();
-      const subject = "QuantFund Portal - Password Recovery";
-      const text = `Hello ${user.name},\n\nWe received a request to recover your password.\nYour account recovery verification code is:\n\n${code}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, please ignore this email and secure your account.\n\nBest regards,\nQuantFund Security Desk`;
+      const subject = "Nonaxen Infra Portal - Password Recovery";
+      const text = `Hello ${user.name},\n\nWe received a request to recover your password.\nYour account recovery verification code is:\n\n${code}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, please ignore this email and secure your account.\n\nBest regards,\nNonaxen Infra Security Desk`;
       const html = `
         <div style="font-family: sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e4e4e7; border-radius: 8px;">
-          <h2 style="color: #10b981; margin-top: 0;">QuantFund Security</h2>
+          <h2 style="color: #10b981; margin-top: 0;">Nonaxen Infra Security</h2>
           <p>Hello <strong>${user.name}</strong>,</p>
           <p>We received a request to reset your password. Use the following 6-digit verification code to complete the process:</p>
           <div style="background-color: #f4f4f5; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 4px; border-radius: 6px; margin: 20px 0; color: #0f172a;">
@@ -885,7 +902,7 @@ async function startServer() {
           </div>
           <p style="font-size: 12px; color: #71717a;">This verification code is valid for 15 minutes. If you did not make this request, you can safely ignore this email.</p>
           <hr style="border: 0; border-top: 1px solid #e4e4e7; margin: 20px 0;" />
-          <p style="font-size: 11px; color: #a1a1aa; font-style: italic;">QuantFund Security Desk • Enterprise Licensing & Compliance Platform</p>
+          <p style="font-size: 11px; color: #a1a1aa; font-style: italic;">Nonaxen Infra Security Desk • Enterprise Licensing & Compliance Platform</p>
         </div>
       `;
 
@@ -1003,7 +1020,7 @@ async function startServer() {
         key: license.license_key,
         hwid: license.hardware_id,
         expires: license.expires_at,
-        issuer: "QuantFund-Auth-v1",
+        issuer: "Nonaxen-Infra-Auth-v1",
         timestamp: new Date().toISOString()
       };
 

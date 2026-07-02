@@ -155,7 +155,7 @@ export function LoginPage({ onLogin, showToast }: LoginPageProps) {
                 <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center mb-4 shadow-[0_0_20px_rgba(16,185,129,0.1)]">
                   <Shield className="w-8 h-8 text-emerald-400" />
                 </div>
-                <h1 className="text-2xl font-bold text-white tracking-tight">QuantFund Portal</h1>
+                <h1 className="text-2xl font-bold text-white tracking-tight">Nonaxen Infra Portal</h1>
                 <p className="text-zinc-500 text-sm mt-2">Enterprise Licensing & Audit Management</p>
               </div>
 
@@ -463,7 +463,7 @@ export function LoginPage({ onLogin, showToast }: LoginPageProps) {
         </div>
         
         <p className="text-center text-zinc-600 text-[10px] mt-6 font-mono tracking-widest uppercase">
-          QuantFund Security Infrastructure v4.2.0
+          Nonaxen Infra Security Infrastructure v4.2.0
         </p>
       </motion.div>
     </div>

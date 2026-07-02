@@ -2,11 +2,11 @@ import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { License, LicenseEvent, Fund, Client, SoftwareProduct, LicenseTier, AuditSchedule, AppUser, AppRole, AuditLog } from './types';
-import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut } from 'lucide-react';
+import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, RadialBarChart, RadialBar } from 'recharts';
 import { LoginPage } from './components/LoginPage';
 
 export default function App() {
@@ -67,13 +67,13 @@ export default function App() {
     fetchLatencyThreshold();
     
     // Check for existing session
-    const savedUser = localStorage.getItem('quant_user');
+    const savedUser = localStorage.getItem('nonaxen_user');
     if (savedUser) {
       try {
         setCurrentUser(JSON.parse(savedUser));
         setIsAuthenticated(true);
       } catch (err) {
-        localStorage.removeItem('quant_user');
+        localStorage.removeItem('nonaxen_user');
       }
     }
   }, []);
@@ -81,13 +81,13 @@ export default function App() {
   const handleLogin = (user: AppUser) => {
     setCurrentUser(user);
     setIsAuthenticated(true);
-    localStorage.setItem('quant_user', JSON.stringify(user));
+    localStorage.setItem('nonaxen_user', JSON.stringify(user));
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
     setIsAuthenticated(false);
-    localStorage.removeItem('quant_user');
+    localStorage.removeItem('nonaxen_user');
     showToast('Logged out successfully', 'success');
   };
 
@@ -123,12 +123,36 @@ export default function App() {
   };
 
   const executeBulkAction = (action: 'delete' | 'suspend' | 'activate') => {
+    // Store previous states for undo (only for status changes)
+    const previousStates = new Map<string, string>();
+    if (action !== 'delete') {
+      selectedLicenses.forEach(id => {
+        const license = licenses.find(l => l.id === id);
+        if (license) previousStates.set(id, license.status);
+      });
+    }
+
+    const affectedCount = selectedLicenses.size;
+
     selectedLicenses.forEach(id => {
       if (action === 'delete') deleteLicense(id);
       else updateStatus(id, action === 'suspend' ? 'suspended' : 'active');
     });
+
     setSelectedLicenses(new Set());
-    showToast(`Bulk action '${action}' applied to ${selectedLicenses.size} licenses`, 'success');
+
+    const undoHandler = action !== 'delete' ? () => {
+      previousStates.forEach((status, id) => {
+        updateStatus(id, status as any);
+      });
+      showToast('Action undone successfully', 'success');
+    } : undefined;
+
+    showToast(
+      `Bulk action '${action}' applied to ${affectedCount} licenses`, 
+      'success',
+      undoHandler
+    );
   };
 
   const toggleRow = (id: string) => {
@@ -211,11 +235,11 @@ export default function App() {
   const [isEventsOpen, setIsEventsOpen] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [toast, setToast] = useState<{message: string, type: 'success'|'error'} | null>(null);
+  const [toast, setToast] = useState<{message: string, type: 'success'|'error', onUndo?: () => void} | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
+  const showToast = (message: string, type: 'success' | 'error' = 'success', onUndo?: () => void) => {
+    setToast({ message, type, onUndo });
+    setTimeout(() => setToast(null), 5000);
   };
 
   const openEvents = async (license: License) => {
@@ -375,7 +399,7 @@ export default function App() {
 
     socket.on('users:init', (data: AppUser[]) => {
       setAllUsers(data);
-      const saved = localStorage.getItem('quant_user');
+      const saved = localStorage.getItem('nonaxen_user');
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
@@ -973,20 +997,86 @@ export default function App() {
                               const color = score <= 30 ? "bg-emerald-500" : score <= 70 ? "bg-amber-500" : "bg-rose-500";
                               const textColor = score <= 30 ? "text-emerald-500" : score <= 70 ? "text-amber-500" : "text-rose-500";
                               return (
-                                <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-3 relative group cursor-help">
+                                  {/* Rich Tooltip Breakdown */}
+                                  <div className="absolute bottom-full left-0 mb-3 w-64 p-4 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl opacity-0 group-hover:opacity-100 transition-all pointer-events-none z-[100] transform translate-y-2 group-hover:translate-y-0 backdrop-blur-xl">
+                                    <div className="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800">
+                                      <div className="flex items-center gap-2">
+                                        <div className={cn("p-1.5 rounded-md", color.replace('bg-', 'bg-opacity-20 '))}>
+                                          <Icon className={cn("w-3.5 h-3.5", textColor)} />
+                                        </div>
+                                        <span className="text-[11px] font-bold text-zinc-100 uppercase tracking-wider">Risk Analysis</span>
+                                      </div>
+                                      <span className={cn("text-xs font-mono font-bold", textColor)}>{score}%</span>
+                                    </div>
+                                    
+                                    <div className="space-y-3">
+                                      <div className="space-y-1">
+                                        <div className="flex justify-between items-center text-[10px]">
+                                          <span className="text-zinc-500">Heartbeat Failures</span>
+                                          <span className={cn("font-mono font-bold", (scoreDetails?.failed_pings || 0) > 0 ? "text-rose-400" : "text-emerald-400")}>
+                                            +{Math.min((scoreDetails?.failed_pings || 0) * 10, 30)}
+                                          </span>
+                                        </div>
+                                        <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden">
+                                          <div className="h-full bg-rose-500/50" style={{ width: `${Math.min(((scoreDetails?.failed_pings || 0) * 10) / 1, 100)}%` }} />
+                                        </div>
+                                        <div className="text-[9px] text-zinc-600 italic">Detected {scoreDetails?.failed_pings || 0} failed verification attempts</div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <div className="flex justify-between items-center text-[10px]">
+                                          <span className="text-zinc-500">Geographic Anomalies</span>
+                                          <span className={cn("font-mono font-bold", (scoreDetails?.distinct_ips || 0) > 1 ? "text-rose-400" : "text-emerald-400")}>
+                                            +{Math.min(Math.max((scoreDetails?.distinct_ips || 0) - 1, 0) * 15, 35)}
+                                          </span>
+                                        </div>
+                                        <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden">
+                                          <div className="h-full bg-amber-500/50" style={{ width: `${Math.min((Math.max((scoreDetails?.distinct_ips || 0) - 1, 0) * 15) / 0.35, 100)}%` }} />
+                                        </div>
+                                        <div className="text-[9px] text-zinc-600 italic">Accessed from {scoreDetails?.distinct_ips || 1} distinct IP addresses</div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <div className="flex justify-between items-center text-[10px]">
+                                          <span className="text-zinc-500">Hardware Drift</span>
+                                          <span className={cn("font-mono font-bold", (scoreDetails?.distinct_hwids || 0) > 1 ? "text-rose-400" : "text-emerald-400")}>
+                                            +{Math.min(Math.max((scoreDetails?.distinct_hwids || 0) - 1, 0) * 20, 35)}
+                                          </span>
+                                        </div>
+                                        <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden">
+                                          <div className="h-full bg-indigo-500/50" style={{ width: `${Math.min((Math.max((scoreDetails?.distinct_hwids || 0) - 1, 0) * 20) / 0.35, 100)}%` }} />
+                                        </div>
+                                        <div className="text-[9px] text-zinc-600 italic">Shared across {scoreDetails?.distinct_hwids || 1} hardware signatures</div>
+                                      </div>
+
+                                      {(license.status === 'revoked' || license.status === 'suspended') && (
+                                        <div className="pt-2 border-t border-zinc-800">
+                                          <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-zinc-500">Administrative Penalty</span>
+                                            <span className="font-mono font-bold text-rose-400">+{license.status === 'revoked' ? 50 : 25}</span>
+                                          </div>
+                                          <div className="text-[9px] text-rose-600 italic mt-0.5 uppercase font-bold">Status: {license.status}</div>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <div className="mt-4 pt-3 border-t border-zinc-800 flex items-center justify-between">
+                                      <div className="flex items-center gap-1.5">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                                        <span className="text-[9px] text-zinc-500 font-mono uppercase tracking-tighter">OLAP Engine: DuckDB v0.10</span>
+                                      </div>
+                                    </div>
+                                  </div>
+
                                   <Icon className={cn("w-4 h-4", textColor)} />
                                   <div className="flex flex-col gap-1">
-                                    <div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                                      <div className={cn("h-full", color)} style={{ width: `${score}%` }} />
+                                    <div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden shadow-inner">
+                                      <div className={cn("h-full transition-all duration-500 ease-out", color)} style={{ width: `${score}%` }} />
                                     </div>
                                     <span className={cn("text-[10px] font-mono font-bold", textColor)}>
                                       Score: {score}
                                     </span>
-                                    {scoreDetails && (
-                                      <span className="text-[9px] font-mono text-zinc-500 block">
-                                        Pings Fail: {scoreDetails.failed_pings} • IPs: {scoreDetails.distinct_ips} • HWIDs: {scoreDetails.distinct_hwids}
-                                      </span>
-                                    )}
                                   </div>
                                 </div>
                               );
@@ -1132,7 +1222,7 @@ export default function App() {
         )}
 
         {/* Other Tabs */}
-        {activeTab === 'dashboard' && <DashboardView licenses={licenses} />}
+        {activeTab === 'dashboard' && <DashboardView licenses={licenses} riskScores={duckDBRiskScores} />}
         {activeTab === 'audit_logs' && <AuditLogsView logs={auditLogs} />}
         {activeTab === 'users' && (
           <UsersView 
@@ -1329,11 +1419,26 @@ export default function App() {
       {/* Toast Notification */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-4">
-          <div className={cn("px-4 py-3 rounded-lg border shadow-lg backdrop-blur-md flex items-center gap-3", 
+          <div className={cn("px-4 py-3 rounded-lg border shadow-lg backdrop-blur-md flex items-center gap-4", 
             toast.type === 'success' ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border-rose-500/20 text-rose-400"
           )}>
-            {toast.type === 'success' ? <ShieldCheck className="w-5 h-5" /> : <ShieldAlert className="w-5 h-5" />}
-            <span className="text-sm font-medium">{toast.message}</span>
+            <div className="flex items-center gap-3">
+              {toast.type === 'success' ? <ShieldCheck className="w-5 h-5" /> : <ShieldAlert className="w-5 h-5" />}
+              <span className="text-sm font-medium">{toast.message}</span>
+            </div>
+            {toast.onUndo && (
+              <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toast.onUndo?.();
+                  setToast(null);
+                }}
+                className="px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 text-[10px] font-bold uppercase tracking-wider border border-indigo-500/30 transition-all flex items-center gap-1"
+              >
+                <Undo2 className="w-3 h-3" />
+                Undo
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -4324,10 +4429,26 @@ function EditNodeConfigModal({
   );
 }
 
-function DashboardView({ licenses }: { licenses: License[] }) {
+function DashboardView({ licenses, riskScores }: { licenses: License[], riskScores: Record<string, any> }) {
   const currentRevenue = licenses.reduce((acc, l) => acc + (l.product_price || 0), 0);
   const currentActive = licenses.filter(l => l.status === 'active').length;
   const [generating, setGenerating] = useState(false);
+  const [dbHealth, setDbHealth] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch('/api/diagnostics/db-health');
+        const data = await res.json();
+        setDbHealth(data);
+      } catch (err) {
+        console.error("Failed to fetch DB health:", err);
+      }
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 10000); // Check every 10s
+    return () => clearInterval(interval);
+  }, []);
 
   const generateMonthlyAuditPDF = async () => {
     setGenerating(true);
@@ -4565,8 +4686,83 @@ function DashboardView({ licenses }: { licenses: License[] }) {
   const prevMonthRevenue = chartData[4].revenue;
   const growth = ((currentMonthRevenue - prevMonthRevenue) / prevMonthRevenue) * 100;
 
+  // Prepare Risk Distribution Data for RadialBarChart
+  const riskDistribution = [
+    { name: 'Critical (80-100)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) >= 80).length, fill: '#f43f5e' },
+    { name: 'High (60-79)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) >= 60 && (riskScores[l.id]?.risk_score || 0) < 80).length, fill: '#fb923c' },
+    { name: 'Moderate (40-59)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) >= 40 && (riskScores[l.id]?.risk_score || 0) < 60).length, fill: '#fbbf24' },
+    { name: 'Low (0-39)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) < 40).length, fill: '#10b981' }
+  ].filter(d => d.value > 0);
+
   return (
     <div className="space-y-6">
+      {/* Database Diagnostic Card */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-zinc-900/30 border border-zinc-800/80 p-4 rounded-xl backdrop-blur-sm flex items-center gap-4">
+          <div className={cn("p-3 rounded-lg bg-opacity-10", 
+            dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500 text-emerald-400" : "bg-rose-500 text-rose-400"
+          )}>
+            <Database className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium text-zinc-100">SQLite Core Engine</h4>
+              <span className={cn("text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded", 
+                dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+              )}>
+                {dbHealth?.sqlite?.status || 'Checking...'}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 mt-1.5">
+              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
+                Journal: <span className="text-zinc-300">{dbHealth?.sqlite?.journal_mode || '...'}</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
+                Tables: <span className="text-zinc-300">{dbHealth?.sqlite?.tables || 0}</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
+                Conn: <span className="text-zinc-300">{dbHealth?.sqlite?.connectionStatus || 'active'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-zinc-900/30 border border-zinc-800/80 p-4 rounded-xl backdrop-blur-sm flex items-center gap-4">
+          <div className={cn("p-3 rounded-lg bg-opacity-10", 
+            dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500 text-indigo-400" : "bg-rose-500 text-rose-400"
+          )}>
+            <Zap className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium text-zinc-100">DuckDB OLAP Engine</h4>
+              <span className={cn("text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded", 
+                dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+              )}>
+                {dbHealth?.duckdb?.status || 'Checking...'}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 mt-1.5">
+              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
+                Sync Status: <span className="text-zinc-300">Synchronized</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
+                RAM: <span className="text-zinc-300">{dbHealth?.duckdb?.memory_usage ? `${Math.round(dbHealth.duckdb.memory_usage / 1024 / 1024)}MB` : '...'}</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
+                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
+                Records: <span className="text-zinc-300">{dbHealth?.duckdb?.records || 0}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Audit Action Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-zinc-900/30 border border-zinc-800/80 p-6 rounded-xl backdrop-blur-sm gap-4">
         <div>
@@ -4634,6 +4830,53 @@ function DashboardView({ licenses }: { licenses: License[] }) {
                 <Bar dataKey="active" fill="#34d399" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm lg:col-span-2">
+          <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-rose-400"/> Enterprise Risk Score Distribution
+          </h3>
+          <div className="h-80 flex flex-col md:flex-row items-center justify-center gap-8">
+            <div className="w-full h-full max-w-[400px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <RadialBarChart 
+                  cx="50%" 
+                  cy="50%" 
+                  innerRadius="30%" 
+                  outerRadius="100%" 
+                  barSize={15} 
+                  data={riskDistribution}
+                  startAngle={180} 
+                  endAngle={-180}
+                >
+                  <RadialBar
+                    background
+                    dataKey="value"
+                    cornerRadius={10}
+                  />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
+                    itemStyle={{ color: '#e4e4e7' }}
+                  />
+                  <Legend 
+                    iconSize={10} 
+                    layout="vertical" 
+                    verticalAlign="middle" 
+                    wrapperStyle={{ right: -20, top: 0, fontSize: '11px', color: '#a1a1aa' }} 
+                  />
+                </RadialBarChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="grid grid-cols-2 gap-4 w-full md:w-auto">
+              {riskDistribution.map(d => (
+                <div key={d.name} className="bg-zinc-950/50 p-3 rounded-lg border border-zinc-800/50 min-w-[140px]">
+                  <div className="text-[10px] text-zinc-500 font-mono uppercase mb-1">{d.name.split(' ')[0]}</div>
+                  <div className="text-xl font-bold text-zinc-200">{d.value}</div>
+                  <div className="text-[9px] text-zinc-600 mt-1">Licenses in bracket</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
         

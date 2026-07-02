@@ -44,7 +44,8 @@ export async function initializeDuckDBSchema() {
         last_active_ip VARCHAR,
         device_fingerprint VARCHAR,
         asset_classes VARCHAR,
-        restricted_accounts VARCHAR
+        restricted_accounts VARCHAR,
+        billing_cycle VARCHAR
       );
     `);
 
@@ -92,7 +93,7 @@ export async function syncSQLiteToDuckDB() {
     for (const l of licenses) {
       await queryDuckDB(`
         INSERT INTO licenses VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
       `, [
         l.id, l.software_name, l.tier, l.license_key, l.status, l.issued_to,
@@ -100,7 +101,8 @@ export async function syncSQLiteToDuckDB() {
         l.max_volume_usd || 0, l.api_calls_limit || 0, l.created_at, l.expires_at,
         l.product_price || 0, l.current_earnings || 0, l.daily_earnings || 0,
         l.weekly_earnings || 0, l.monthly_earnings || 0, l.last_active_ip || null,
-        l.device_fingerprint || null, l.asset_classes || '[]', l.restricted_accounts || '[]'
+        l.device_fingerprint || null, l.asset_classes || '[]', l.restricted_accounts || '[]',
+        l.billing_cycle || 'onetime'
       ]);
     }
     for (const e of events) {
@@ -208,5 +210,25 @@ export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAn
   } catch (err) {
     console.error("DuckDB Risk calculation failed, returning fallback:", err);
     return {};
+  }
+}
+
+export async function checkDuckDBHealth() {
+  try {
+    const tableCount = await queryDuckDB("SELECT count(*) as count FROM information_schema.tables WHERE table_schema = 'main'");
+    const licenseCount = await queryDuckDB("SELECT count(*) as count FROM licenses");
+    
+    return {
+      status: 'healthy',
+      tables: Number(tableCount[0]?.count || 0),
+      records: Number(licenseCount[0]?.count || 0),
+      memory_usage: process.memoryUsage().heapUsed,
+      type: 'in-memory'
+    };
+  } catch (err) {
+    return {
+      status: 'error',
+      error: (err as Error).message
+    };
   }
 }

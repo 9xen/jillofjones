@@ -47,7 +47,20 @@ db.exec(`
     restricted_accounts TEXT,
     billing_cycle TEXT DEFAULT 'onetime'
   );
+`);
 
+// Migration: Add billing_cycle if missing
+try {
+  db.prepare("SELECT billing_cycle FROM licenses LIMIT 1").get();
+} catch (e) {
+  try {
+    db.exec("ALTER TABLE licenses ADD COLUMN billing_cycle TEXT DEFAULT 'onetime'");
+  } catch (err) {
+    console.error("Migration failed:", err);
+  }
+}
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS license_events (
     id TEXT PRIMARY KEY,
     license_id TEXT NOT NULL,
@@ -114,7 +127,7 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS password_recovery_codes (
-    email TEXT PRIMARY KEY,
+    email TEXT PRIMARY KEY COLLATE NOCASE,
     code TEXT NOT NULL,
     expires_at TEXT NOT NULL
   );
@@ -123,7 +136,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL COLLATE NOCASE,
     password TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -133,9 +146,14 @@ db.exec(`
   -- Seed Default Users (Passwords are 'admin123', 'manager123', 'auditor123')
   INSERT OR IGNORE INTO users (id, name, email, password, role, created_at)
   VALUES 
-    ('user_01', 'System Admin', 'admin@quantfund.net', '$2a$10$zR8WfJb.fB6iG7KjP9q1u.7x6f5g4h3j2k1l0m9n8b7v6c5x4z3y2', 'Administrator', '2026-01-01T00:00:00Z'),
-    ('user_02', 'License Manager', 'manager@quantfund.net', '$2a$10$zR8WfJb.fB6iG7KjP9q1u.7x6f5g4h3j2k1l0m9n8b7v6c5x4z3y2', 'Manager', '2026-01-10T00:00:00Z'),
-    ('user_03', 'Compliance Auditor', 'auditor@quantfund.net', '$2a$10$zR8WfJb.fB6iG7KjP9q1u.7x6f5g4h3j2k1l0m9n8b7v6c5x4z3y2', 'Auditor', '2026-02-01T00:00:00Z');
+    ('user_01', 'System Admin', 'admin@nonaxen.infra', '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K', 'Administrator', '2026-01-01T00:00:00Z'),
+    ('user_02', 'License Manager', 'manager@nonaxen.infra', '$2b$10$3jkAUF4KqKYmySiU4GwoSutqg/vCAV9XTp3c.Oc7udSlPX1LwbQf2', 'Manager', '2026-01-10T00:00:00Z'),
+    ('user_03', 'Compliance Auditor', 'auditor@nonaxen.infra', '$2b$10$XxZt15ZoOOJ0B7vYxyawbeMojbFl2Rq6aS1wbbTTzDEryiB9IqWSu', 'Auditor', '2026-02-01T00:00:00Z');
+
+  -- Ensure existing seeded users have the correct passwords
+  UPDATE users SET password = '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K' WHERE id = 'user_01';
+  UPDATE users SET password = '$2b$10$3jkAUF4KqKYmySiU4GwoSutqg/vCAV9XTp3c.Oc7udSlPX1LwbQf2' WHERE id = 'user_02';
+  UPDATE users SET password = '$2b$10$XxZt15ZoOOJ0B7vYxyawbeMojbFl2Rq6aS1wbbTTzDEryiB9IqWSu' WHERE id = 'user_03';
 
   -- Seed Default Licenses
   INSERT OR IGNORE INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle)
@@ -157,8 +175,6 @@ db.exec(`
     ('ev_04', 'lic_04', 'verification_failed', '{"reason":"IP not whitelisted","ip":"192.0.2.99","hardware_id":"HWID-BLACKWOOD-1111"}', '2026-06-26T09:30:00Z'),
     ('ev_05', 'lic_04', 'verification_failed', '{"reason":"Hardware ID mismatch","ip":"192.0.2.1","hardware_id":"HWID-SUSPECT-9999"}', '2026-06-26T12:00:00Z'),
     ('ev_06', 'lic_04', 'verification_failed', '{"reason":"IP not whitelisted","ip":"185.190.140.12","hardware_id":"HWID-CLONE-XYZ"}', '2026-06-26T15:15:00Z'),
-
-    -- lic_05 triggers regular success events
     ('ev_07', 'lic_05', 'verification_success', '{"ip":"198.51.100.5","hardware_id":"HWID-ORION-5555"}', '2026-06-26T01:00:00Z'),
     ('ev_08', 'lic_05', 'verification_success', '{"ip":"198.51.100.5","hardware_id":"HWID-ORION-5555"}', '2026-06-26T06:00:00Z');
 `);
@@ -167,7 +183,7 @@ db.exec(`
 const softwareCount = (db.prepare('SELECT COUNT(*) as count FROM software_products').get() as any).count;
 if (softwareCount === 0) {
   db.exec(`
-    INSERT INTO software_products (id, name, description, base_price) VALUES
+    INSERT OR IGNORE INTO software_products (id, name, description, base_price) VALUES
       ('prod_1', 'QuantMaster HFT', 'High frequency execution algorithms with low latency market feeds', 12500),
       ('prod_2', 'AlphaSeeker Neural', 'Neural network models for sentiment and trend predictions', 9500),
       ('prod_3', 'HedgeBot Pro', 'Algorithmic spot/futures hedge automation system', 6000),
@@ -179,7 +195,7 @@ if (softwareCount === 0) {
 const tierCount = (db.prepare('SELECT COUNT(*) as count FROM license_tiers').get() as any).count;
 if (tierCount === 0) {
   db.exec(`
-    INSERT INTO license_tiers (id, name, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, description) VALUES
+    INSERT OR IGNORE INTO license_tiers (id, name, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, description) VALUES
       ('tier_1', 'Standard', 10000000, 10000, 300000, 3600000, 'Up to $10M Monthly Volume'),
       ('tier_2', 'Professional', 100000000, 25000, 750000, 9000000, 'Up to $100M Monthly Volume'),
       ('tier_3', 'Institutional', 1000000000, 50000, 1500000, 18000000, 'Institutional level with unlimited volume limits');
@@ -190,7 +206,7 @@ if (tierCount === 0) {
 const clientCount = (db.prepare('SELECT COUNT(*) as count FROM clients').get() as any).count;
 if (clientCount === 0) {
   db.exec(`
-    INSERT INTO clients (id, name, email, mobile, address, extra_info) VALUES
+    INSERT OR IGNORE INTO clients (id, name, email, mobile, address, extra_info) VALUES
       ('cli_1', 'Polaris Hedge Fund', 'ops@polaris.com', '+1-555-0199', '120 Wall Street, New York, NY', '{"region":"AMER","payout_terms":"Net-30"}'),
       ('cli_2', 'Aether Capital', 'contact@aethercap.io', '+44-20-7946-0192', '30 St Mary Axe, London, UK', '{"region":"EMEA","payout_terms":"Net-15"}'),
       ('cli_3', 'Nova Alpha', 'trade@novaalpha.sg', '+65-6789-0123', 'Marina Bay Financial Centre, Singapore', '{"region":"APAC","payout_terms":"Prepaid"}'),
@@ -369,8 +385,8 @@ export function deleteLicenseTier(id: string): void {
 const auditScheduleCount = (db.prepare("SELECT COUNT(*) as count FROM audit_schedule").get() as any).count;
 if (auditScheduleCount === 0) {
   db.prepare(`
-    INSERT INTO audit_schedule (id, enabled, recipients, dispatch_hour, report_scope, last_run_at, next_run_at)
-    VALUES ('default', 1, 'secops@quantfund.net, compliance@quantfund.net', 9, 'comprehensive', NULL, '2026-08-01T09:00:00Z')
+    INSERT OR IGNORE INTO audit_schedule (id, enabled, recipients, dispatch_hour, report_scope, last_run_at, next_run_at)
+    VALUES ('default', 1, 'secops@nonaxen.infra, compliance@nonaxen.infra', 9, 'comprehensive', NULL, '2026-08-01T09:00:00Z')
   `).run();
 }
 
@@ -489,5 +505,27 @@ export function deleteRecoveryCode(email: string): void {
 
 export function updateUserPassword(email: string, passwordHash: string): void {
   db.prepare('UPDATE users SET password = ? WHERE email = ?').run(passwordHash, email);
+}
+
+export function checkSQLiteHealth() {
+  try {
+    const result = db.pragma('integrity_check');
+    const tableCount = (db.prepare("SELECT count(*) as count FROM sqlite_master WHERE type='table'").get() as any).count;
+    const connectionStatus = db.open ? 'healthy' : 'disconnected';
+    
+    return {
+      status: result === 'ok' ? 'healthy' : 'corrupted',
+      tables: tableCount,
+      journal_mode: db.pragma('journal_mode'),
+      open: db.open,
+      connectionStatus
+    };
+  } catch (err) {
+    return {
+      status: 'error',
+      error: (err as Error).message,
+      connectionStatus: 'error'
+    };
+  }
 }
 
