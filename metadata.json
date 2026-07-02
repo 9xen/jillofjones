@@ -1,0 +1,6 @@
+{
+  "name": "Enterprise License Manager",
+  "description": "Real-time enterprise license management application with built-in database and WebSockets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

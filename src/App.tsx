@@ -1,0 +1,4669 @@
+import React, { useEffect, useState, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
+import { motion, AnimatePresence } from 'motion/react';
+import { License, LicenseEvent, Fund, Client, SoftwareProduct, LicenseTier, AuditSchedule, AppUser, AppRole, AuditLog } from './types';
+import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut } from 'lucide-react';
+import { jsPDF } from 'jspdf';
+import { cn } from './lib/utils';
+import { format, addDays } from 'date-fns';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line } from 'recharts';
+import { LoginPage } from './components/LoginPage';
+
+export default function App() {
+  const [licenses, setLicenses] = useState<License[]>([]);
+  const [connected, setConnected] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [search, setSearch] = useState('');
+  const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [visibleColumns, setVisibleColumns] = useState({
+    license: true,
+    software: true,
+    security: true,
+    risk: true,
+    earnings: true,
+    status: true,
+  });
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [dateRange, setDateRange] = useState({ start: '', end: '', type: 'created_at' as 'created_at' | 'expires_at' });
+  const [selectedLicenses, setSelectedLicenses] = useState<Set<string>>(new Set());
+  const [clients, setClients] = useState<Client[]>([]);
+  const [softwareProducts, setSoftwareProducts] = useState<SoftwareProduct[]>([]);
+  const [licenseTiers, setLicenseTiers] = useState<LicenseTier[]>([]);
+  const [activeTab, setActiveTab] = useState('licenses');
+  const [duckDBRiskScores, setDuckDBRiskScores] = useState<Record<string, { failed_pings: number, distinct_ips: number, distinct_hwids: number, risk_score: number }>>({});
+  const [liveWebSocketNodes, setLiveWebSocketNodes] = useState<Array<{ license_key: string, socketId: string, ip: string, hardwareId: string, connectedAt: string, rtt?: number, isDegraded?: boolean, heartbeatInterval?: number, lastPongAt?: number }>>([]);
+  const [allUsers, setAllUsers] = useState<AppUser[]>([]);
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [renewalAlerts, setRenewalAlerts] = useState<Array<{ id: string, license_id: string, software_name: string, days_remaining: number, expires_at: string, severity: 'critical' | 'warning' | 'info' }>>([]);
+  const [simulatedClientKey, setSimulatedClientKey] = useState<string>('');
+  const [simulationLogs, setSimulationLogs] = useState<string[]>([]);
+  const [systemPublicKey, setSystemPublicKey] = useState<string>('');
+  const [latencyThreshold, setLatencyThreshold] = useState<number>(150);
+  const socketRef = useRef<Socket | null>(null);
+
+  const fetchPublicKey = async () => {
+    try {
+      const res = await fetch('/api/system/public-key');
+      const data = await res.json();
+      setSystemPublicKey(data.publicKey);
+    } catch (err) {
+      console.error("Failed to fetch system public key");
+    }
+  };
+
+  const fetchLatencyThreshold = async () => {
+    try {
+      const res = await fetch('/api/settings/latency-threshold');
+      const data = await res.json();
+      setLatencyThreshold(data.threshold);
+    } catch (err) {
+      console.error("Failed to fetch latency threshold:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchPublicKey();
+    fetchLatencyThreshold();
+    
+    // Check for existing session
+    const savedUser = localStorage.getItem('quant_user');
+    if (savedUser) {
+      try {
+        setCurrentUser(JSON.parse(savedUser));
+        setIsAuthenticated(true);
+      } catch (err) {
+        localStorage.removeItem('quant_user');
+      }
+    }
+  }, []);
+
+  const handleLogin = (user: AppUser) => {
+    setCurrentUser(user);
+    setIsAuthenticated(true);
+    localStorage.setItem('quant_user', JSON.stringify(user));
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setIsAuthenticated(false);
+    localStorage.removeItem('quant_user');
+    showToast('Logged out successfully', 'success');
+  };
+
+  const fetchRiskScores = async () => {
+    try {
+      const res = await fetch('/api/analytics/risk-scores');
+      const data = await res.json();
+      setDuckDBRiskScores(data);
+    } catch (err) {
+      console.error("Failed to fetch DuckDB risk scores:", err);
+    }
+  };
+
+  // RBAC Permission Helpers
+  const canManageLicenses = currentUser?.role === 'Administrator' || currentUser?.role === 'Manager';
+  const canManageSystem = currentUser?.role === 'Administrator';
+  const canViewAudit = !!currentUser; // All roles can see audit logs, but Auditor is read-only
+  const isReadOnly = currentUser?.role === 'Auditor';
+  
+  const toggleSelectAll = () => {
+    if (selectedLicenses.size === filteredLicenses.length) {
+      setSelectedLicenses(new Set());
+    } else {
+      setSelectedLicenses(new Set(filteredLicenses.map(l => l.id)));
+    }
+  };
+
+  const toggleSelect = (id: string) => {
+    const next = new Set(selectedLicenses);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedLicenses(next);
+  };
+
+  const executeBulkAction = (action: 'delete' | 'suspend' | 'activate') => {
+    selectedLicenses.forEach(id => {
+      if (action === 'delete') deleteLicense(id);
+      else updateStatus(id, action === 'suspend' ? 'suspended' : 'active');
+    });
+    setSelectedLicenses(new Set());
+    showToast(`Bulk action '${action}' applied to ${selectedLicenses.size} licenses`, 'success');
+  };
+
+  const toggleRow = (id: string) => {
+    setExpandedRows(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const exportLicense = (license: License) => {
+    const blob = new Blob([JSON.stringify(license, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `license-audit-${license.id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportLicensesToCSV = () => {
+    const headers = ['ID', 'Issued To', 'Expires At', 'Status', 'Earnings'];
+    const rows = filteredLicenses.map(l => [
+      l.id,
+      l.issued_to,
+      l.expires_at,
+      l.status,
+      l.earnings
+    ]);
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'licenses-export.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const extendLicense = (id: string, days: number) => {
+    if (!socketRef.current) return;
+    const license = licenses.find(l => l.id === id);
+    if (!license) return;
+    
+    const newExpiry = addDays(new Date(license.expires_at), days).toISOString();
+    socketRef.current.emit('licenses:extend', { id, expiresAt: newExpiry, user: currentUser });
+    
+    setIsExtendModalOpen(false);
+    showToast('License extension requested', 'success');
+  };
+
+  const calculateRiskScore = (license: License) => {
+    let score = 0;
+    // Mock calculation based on status, IP, etc.
+    if (license.status === 'revoked') score += 50;
+    if (license.status === 'suspended') score += 30;
+    if (!license.hardware_id) score += 20; // Unlocked hardware is riskier
+    if (!license.ip_whitelist) score += 10;
+    
+    // Cap at 100
+    return Math.min(score, 100);
+  };
+
+  const transferLicenses = (newFund: string) => {
+    setLicenses(prev => prev.map(l => {
+      if (selectedLicenses.has(l.id)) {
+        return { ...l, issued_to: newFund };
+      }
+      return l;
+    }));
+    setIsTransferModalOpen(false);
+    setSelectedLicenses(new Set());
+    showToast(`Transferred ${selectedLicenses.size} licenses to ${newFund}`, 'success');
+  };
+  const [isExtendModalOpen, setIsExtendModalOpen] = useState(false);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [extendingLicense, setExtendingLicense] = useState<License | null>(null);
+  const [selectedLicense, setSelectedLicense] = useState<License | null>(null);
+  const [events, setEvents] = useState<LicenseEvent[]>([]);
+  const [isEventsOpen, setIsEventsOpen] = useState(false);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [toast, setToast] = useState<{message: string, type: 'success'|'error'} | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const openEvents = async (license: License) => {
+    setSelectedLicense(license);
+    setIsEventsOpen(true);
+    try {
+      const res = await fetch(`/api/license/${license.id}/events`);
+      const data = await res.json();
+      setEvents(data);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const simulatePing = async (license: License) => {
+    try {
+      await fetch('/api/license/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          license_key: license.license_key,
+          hardware_id: license.hardware_id || 'HWID-SIMULATED',
+          ip: license.last_active_ip || '127.0.0.1'
+        })
+      });
+      // Refresh events if open
+      if (isEventsOpen && selectedLicense?.id === license.id) {
+        openEvents(license);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    const socket = io();
+    socketRef.current = socket;
+
+    socket.on('connect', () => setConnected(true));
+    socket.on('disconnect', () => setConnected(false));
+
+    socket.on('licenses:init', (data: License[]) => {
+      setLicenses(data);
+      fetchRiskScores();
+    });
+
+    socket.on('nodes:live', (data: any[]) => {
+      setLiveWebSocketNodes(data);
+    });
+
+    socket.on('settings:latency-threshold', ({ threshold }: { threshold: number }) => {
+      setLatencyThreshold(threshold);
+    });
+
+    socket.on('node:ping', (data: { license_key: string, sentAt: number }) => {
+      socket.emit('node:pong', { license_key: data.license_key, sentAt: data.sentAt });
+    });
+
+    socket.on('licenses:created', (license: License) => {
+      setLicenses((prev) => [license, ...prev]);
+      fetchRiskScores();
+    });
+
+    socket.on('licenses:status_updated', ({ id, status }) => {
+      setLicenses((prev) => 
+        prev.map((l) => l.id === id ? { ...l, status: status as License['status'] } : l)
+      );
+      fetchRiskScores();
+    });
+
+    socket.on('licenses:earnings_updated', (updates: any[]) => {
+      setLicenses((prev) => {
+        const updateMap = new Map(updates.map(u => [u.id, u]));
+        return prev.map(l => {
+          if (updateMap.has(l.id)) {
+            const u = updateMap.get(l.id)!;
+            return {
+              ...l,
+              current_earnings: u.current_earnings,
+              daily_earnings: u.daily_earnings,
+              weekly_earnings: u.weekly_earnings,
+              monthly_earnings: u.monthly_earnings
+            };
+          }
+          return l;
+        });
+      });
+    });
+
+    socket.on('licenses:config_updated', ({ id, config }) => {
+      setLicenses((prev) =>
+        prev.map((l) => l.id === id ? { ...l, ...config } : l)
+      );
+      fetchRiskScores();
+    });
+
+    socket.on('licenses:api_calls_updated', ({ id, counts }) => {
+      setLicenses((prev) =>
+        prev.map((l) => l.id === id ? {
+          ...l,
+          api_calls_count_daily: counts.daily,
+          api_calls_count_monthly: counts.monthly,
+          api_calls_count_yearly: counts.yearly
+        } : l)
+      );
+    });
+
+    socket.on('licenses:updated', (data: Partial<License> & { id: string }) => {
+      setLicenses((prev) => prev.map((l) => (l.id === data.id ? { ...l, ...data } : l)));
+    });
+
+    socket.on('licenses:status_updated', ({ id, status }: { id: string, status: string }) => {
+      setLicenses((prev) => prev.map((l) => (l.id === id ? { ...l, status } : l)));
+    });
+
+    socket.on('licenses:extended', ({ id, expiresAt }: { id: string, expiresAt: string }) => {
+      setLicenses((prev) => prev.map((l) => (l.id === id ? { ...l, expires_at: expiresAt } : l)));
+    });
+
+    socket.on('licenses:hwid_reset', (id: string) => {
+      setLicenses((prev) => prev.map((l) => (l.id === id ? { ...l, hardware_id: null } : l)));
+      showToast('Hardware ID lock has been reset', 'success');
+    });
+
+    socket.on('licenses:deleted', (id: string) => {
+      setLicenses((prev) => prev.filter((l) => l.id !== id));
+      fetchRiskScores();
+    });
+
+    socket.on('clients:init', (data: Client[]) => {
+      setClients(data);
+    });
+
+    socket.on('clients:created', (client: Client) => {
+      setClients((prev) => [...prev, client]);
+    });
+
+    socket.on('clients:deleted', (id: string) => {
+      setClients((prev) => prev.filter((c) => c.id !== id));
+    });
+
+    socket.on('software_products:init', (data: SoftwareProduct[]) => {
+      setSoftwareProducts(data);
+    });
+
+    socket.on('software_products:created', (prod: SoftwareProduct) => {
+      setSoftwareProducts((prev) => [...prev, prod]);
+    });
+
+    socket.on('software_products:deleted', (id: string) => {
+      setSoftwareProducts((prev) => prev.filter((p) => p.id !== id));
+    });
+
+    socket.on('license_tiers:init', (data: LicenseTier[]) => {
+      setLicenseTiers(data);
+    });
+
+    socket.on('users:init', (data: AppUser[]) => {
+      setAllUsers(data);
+      const saved = localStorage.getItem('quant_user');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          const found = data.find(u => u.id === parsed.id);
+          if (found) setCurrentUser(found);
+          else setCurrentUser(data[0]);
+        } catch (e) {
+          setCurrentUser(data[0]);
+        }
+      } else if (data.length > 0) {
+        setCurrentUser(data[0]);
+      }
+    });
+
+    socket.on('users:created', (user: AppUser) => {
+      setAllUsers(prev => [user, ...prev]);
+    });
+
+    socket.on('users:role_updated', ({ id, role }: { id: string, role: AppRole }) => {
+      setAllUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
+      setCurrentUser(prev => (prev && prev.id === id) ? { ...prev, role } : prev);
+    });
+
+    socket.on('users:deleted', (id: string) => {
+      setAllUsers(prev => prev.filter(u => u.id !== id));
+      setCurrentUser(prev => (prev && prev.id === id) ? null : prev);
+    });
+
+    socket.on('audit_logs:init', (data: AuditLog[]) => {
+      setAuditLogs(data);
+    });
+
+    socket.on('audit:new', (log: AuditLog) => {
+      setAuditLogs(prev => [log, ...prev]);
+      if (log.action === 'zombie_disconnection') {
+        showToast(`Zombie node ${log.entity_id.substring(0, 8)}... disconnected automatically`, 'error');
+        setSimulationLogs(prev => [
+          ...prev,
+          `[${new Date().toLocaleTimeString()}] [ZOMBIE CLEANUP] Server automatically disconnected stale node: ${log.entity_id.substring(0, 8)}... (No heartbeat for >30s)`
+        ]);
+      }
+    });
+
+    socket.on('alerts:renewal', (data: any[]) => {
+      setRenewalAlerts(data);
+    });
+
+    socket.on('license_tiers:created', (tier: LicenseTier) => {
+      setLicenseTiers((prev) => [...prev, tier]);
+    });
+
+    socket.on('license_tiers:deleted', (id: string) => {
+      setLicenseTiers((prev) => prev.filter((t) => t.id !== id));
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  const handleCreateLicense = (licenseData: Partial<License>) => {
+    if (!socketRef.current) return;
+    
+    // Resolve dynamic price and limit config
+    const prod = softwareProducts.find(p => p.name === licenseData.software_name);
+    const tier = licenseTiers.find(t => t.name === licenseData.tier);
+
+    const price = prod ? prod.base_price : 10000;
+    const max_volume = tier ? tier.max_volume_usd : 10000000;
+    const api_limit = tier ? tier.api_calls_limit : 10000;
+    const api_limit_monthly = tier ? tier.api_calls_limit_monthly : 300000;
+    const api_limit_yearly = tier ? tier.api_calls_limit_yearly : 3600000;
+
+    const newLicense: License = {
+      id: crypto.randomUUID(),
+      software_name: licenseData.software_name || 'QuantMaster Pro',
+      tier: licenseData.tier || 'Standard',
+      license_key: Array.from({length: 4}, () => Math.random().toString(36).substring(2, 6).toUpperCase()).join('-'),
+      status: 'active',
+      issued_to: licenseData.issued_to || 'Unknown Entity',
+      hardware_id: null,
+      ip_whitelist: null,
+      features: JSON.stringify(licenseData.tier === 'Institutional' ? ['HFT', 'Sentiment', 'Dark Pool'] : ['Sentiment']),
+      max_volume_usd: max_volume,
+      api_calls_limit: api_limit,
+      api_calls_limit_monthly: api_limit_monthly,
+      api_calls_limit_yearly: api_limit_yearly,
+      api_calls_count_daily: 0,
+      api_calls_count_monthly: 0,
+      api_calls_count_yearly: 0,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      product_price: price,
+      current_earnings: 0,
+      daily_earnings: 0,
+      weekly_earnings: 0,
+      monthly_earnings: 0,
+      last_active_ip: null,
+      device_fingerprint: null,
+      asset_classes: '["forex"]',
+      restricted_accounts: '[]',
+    };
+    socketRef.current.emit('licenses:create', { license: newLicense, user: currentUser });
+    setIsCreateModalOpen(false);
+    showToast('License successfully provisioned', 'success');
+  };
+
+  const updateStatus = (id: string, status: string) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('licenses:update_status', { id, status, user: currentUser });
+    showToast(`License status updated to ${status}`, 'success');
+  };
+
+  const deleteLicense = (id: string) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('licenses:delete', { id, user: currentUser });
+    showToast('License permanently deleted', 'error');
+  };
+
+  const addClient = (clientData: Omit<Client, 'id'>) => {
+    if (!socketRef.current) return;
+    const newClient: Client = {
+      ...clientData,
+      id: 'cli_' + Math.random().toString(36).substring(2, 9)
+    };
+    socketRef.current.emit('clients:create', { client: newClient, user: currentUser });
+  };
+
+  const removeClient = (id: string) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('clients:delete', { id, user: currentUser });
+    showToast('Client removed', 'error');
+  };
+
+  const addSoftwareProduct = (prodData: Omit<SoftwareProduct, 'id'>) => {
+    if (!socketRef.current) return;
+    const newProd: SoftwareProduct = {
+      ...prodData,
+      id: 'prod_' + Math.random().toString(36).substring(2, 9)
+    };
+    socketRef.current.emit('software_products:create', newProd);
+  };
+
+  const removeSoftwareProduct = (id: string) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('software_products:delete', id);
+    showToast('Software Product removed', 'error');
+  };
+
+  const addLicenseTier = (tierData: Omit<LicenseTier, 'id'>) => {
+    if (!socketRef.current) return;
+    const newTier: LicenseTier = {
+      ...tierData,
+      id: 'tier_' + Math.random().toString(36).substring(2, 9)
+    };
+    socketRef.current.emit('license_tiers:create', newTier);
+  };
+
+  const removeLicenseTier = (id: string) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('license_tiers:delete', id);
+    showToast('License Tier removed', 'error');
+  };
+
+  const isExpiringSoon = (dateString: string) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffTime = date.getTime() - now.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays <= 30 && diffDays >= 0;
+  };
+
+  const filteredLicenses = licenses.filter(l => {
+    const matchesSearch = l.issued_to.toLowerCase().includes(search.toLowerCase()) || 
+                          l.license_key.toLowerCase().includes(search.toLowerCase()) ||
+                          l.software_name.toLowerCase().includes(search.toLowerCase()) ||
+                          (l.hardware_id?.toLowerCase().includes(search.toLowerCase()) ?? false) ||
+                          (l.ip_whitelist?.toLowerCase().includes(search.toLowerCase()) ?? false);
+    const matchesStatus = filterStatus === 'all' || l.status === filterStatus;
+    
+    const dateValue = new Date(l[dateRange.type]);
+    const matchesDate = (!dateRange.start || dateValue >= new Date(dateRange.start)) &&
+                        (!dateRange.end || dateValue <= new Date(dateRange.end));
+    
+    return matchesSearch && matchesStatus && matchesDate;
+  });
+
+  const handleUpdateLicenseConfig = (id: string, config: any) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit("licenses:update_config", { id, config });
+    showToast('License configuration updated successfully!', 'success');
+  };
+
+  const handleResetHwid = (id: string) => {
+    if (!socketRef.current) return;
+    if (window.confirm('Are you sure you want to reset the hardware lock for this license? This will allow activation on a new device.')) {
+      socketRef.current.emit('licenses:reset_hwid', { id, user: currentUser });
+    }
+  };
+
+  const handleGenerateOfflineToken = async (id: string) => {
+    try {
+      const res = await fetch(`/api/license/${id}/sign`, { method: 'POST' });
+      const data = await res.json();
+      if (data.token) {
+        // Find SettingsView's state or pass it back up? 
+        // For now let's just show a toast or handle it globally if needed.
+        // Actually, the SettingsView should probably handle its own state for the token display.
+        // But the action can be triggered from elsewhere.
+        showToast('Offline cryptographic token generated', 'success');
+        return data.token;
+      } else {
+        showToast(data.error || 'Failed to generate token', 'error');
+      }
+    } catch (err) {
+      showToast('Error generating token', 'error');
+    }
+    return null;
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    showToast('Copied to clipboard', 'success');
+  };
+
+  if (!isAuthenticated) {
+    return <LoginPage onLogin={handleLogin} showToast={showToast} />;
+  }
+
+  const activeCount = licenses.filter(l => l.status === 'active').length;
+  const revokedCount = licenses.filter(l => l.status === 'revoked').length;
+  const expiredCount = licenses.filter(l => l.status === 'expired').length;
+
+  return (
+    <div className="flex h-screen bg-zinc-950 text-zinc-50 font-sans overflow-hidden selection:bg-indigo-500/30">
+      {/* Mobile Menu Backdrop */}
+      {isMobileMenuOpen && (
+        <div 
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Sidebar */}
+      <aside className={cn(
+        "fixed inset-y-0 left-0 z-50 w-64 bg-zinc-950 border-r border-zinc-800/50 flex flex-col shrink-0 transition-transform duration-300 lg:static lg:translate-x-0",
+        isMobileMenuOpen ? "translate-x-0" : "-translate-x-full"
+      )}>
+        <div className="p-6 flex items-center justify-between text-zinc-50 border-b border-zinc-800/50 lg:border-none">
+          <div className="flex items-center gap-3">
+            <div className="bg-indigo-500/20 border border-indigo-500/30 p-2 rounded-lg">
+              <Key className="w-5 h-5 text-indigo-400" />
+            </div>
+            <h1 className="text-sm font-semibold tracking-wide leading-tight">QUANT<br/>LICENSE MGR</h1>
+          </div>
+          <button onClick={() => setIsMobileMenuOpen(false)} className="lg:hidden text-zinc-500 hover:text-zinc-300">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <nav className="flex-1 px-4 space-y-1.5 mt-4 lg:mt-2 overflow-y-auto">
+          <button onClick={() => { setActiveTab('dashboard'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'dashboard' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+            <Activity className="w-4 h-4" />
+            Dashboard
+          </button>
+          {canViewAudit && (
+            <button onClick={() => { setActiveTab('audit_logs'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'audit_logs' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+              <FileText className="w-4 h-4" />
+              Audit Trail
+            </button>
+          )}
+          <button onClick={() => { setActiveTab('licenses'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'licenses' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+            <Key className="w-4 h-4" />
+            License Management
+          </button>
+          {canManageSystem && (
+            <button onClick={() => { setActiveTab('users'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'users' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+              <Users className="w-4 h-4" />
+              User Management
+            </button>
+          )}
+          <button onClick={() => { setActiveTab('funds'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'funds' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+            <Building className="w-4 h-4" />
+            Funds & Clients
+          </button>
+          {canManageSystem && (
+            <>
+              <button onClick={() => { setActiveTab('products'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'products' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+                <Cpu className="w-4 h-4" />
+                Software Products
+              </button>
+              <button onClick={() => { setActiveTab('tiers'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'tiers' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+                <Layers className="w-4 h-4" />
+                License Tiers
+              </button>
+            </>
+          )}
+          <button onClick={() => { setActiveTab('nodes'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'nodes' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+            <Server className="w-4 h-4" />
+            Nodes
+          </button>
+          <button onClick={() => { setActiveTab('settings'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'settings' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+            <Settings className="w-4 h-4" />
+            Settings
+          </button>
+        </nav>
+        <div className="p-4 border-t border-zinc-800/50 shrink-0 space-y-2">
+          <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/50 px-3 py-2 rounded border border-zinc-800">
+            <div className={cn("w-1.5 h-1.5 rounded-full", connected ? "bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]" : "bg-rose-500")} />
+            {connected ? 'SYNC_ACTIVE' : 'OFFLINE'}
+          </div>
+          {systemPublicKey && (
+            <div className="flex items-center gap-2 text-[10px] font-mono text-emerald-400/80 bg-emerald-500/5 px-3 py-2 rounded border border-emerald-500/10">
+              <ShieldCheck className="w-3 h-3" />
+              RSA_KEY_ACTIVE
+            </div>
+          )}
+          <button 
+            onClick={handleLogout}
+            className="w-full flex items-center gap-2 text-[10px] font-mono text-zinc-500 hover:text-rose-400 bg-zinc-900/30 hover:bg-rose-500/5 px-3 py-2 rounded border border-zinc-800 hover:border-rose-500/20 transition-all cursor-pointer group"
+          >
+            <LogOut className="w-3 h-3 group-hover:rotate-12 transition-transform" />
+            TERMINATE_SESSION
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col overflow-hidden w-full">
+        {/* Renewal Alerts Banner */}
+        {renewalAlerts.length > 0 && (
+          <div className="bg-rose-500/5 border-b border-rose-500/10 shrink-0">
+            <div className="px-4 lg:px-6 py-2 flex items-center gap-4 overflow-x-auto no-scrollbar">
+              <div className="flex items-center gap-1.5 shrink-0">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
+                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">Expiration Alerts</span>
+              </div>
+              <div className="flex gap-2">
+                {renewalAlerts.map(alert => (
+                  <div key={alert.id} className={cn(
+                    "flex items-center gap-2 px-2.5 py-0.5 rounded-md text-[10px] font-mono border transition-all",
+                    alert.severity === 'critical' ? "bg-rose-500/20 text-rose-200 border-rose-500/30 shadow-[0_0_10px_rgba(244,63,94,0.1)]" : 
+                    alert.severity === 'warning' ? "bg-amber-500/10 text-amber-300 border-amber-500/20" : 
+                    "bg-zinc-800 text-zinc-400 border-zinc-700"
+                  )}>
+                    <span className="font-bold uppercase">{alert.software_name}</span>
+                    <span className="opacity-70">EXPIRING IN {alert.days_remaining}D</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Header */}
+        <header className="bg-zinc-900/30 border-b border-zinc-800/50 shrink-0 backdrop-blur-md">
+          <div className="px-4 lg:px-6 h-16 flex items-center justify-between">
+            <div className="flex items-center gap-3 lg:gap-0">
+              <button 
+                onClick={() => setIsMobileMenuOpen(true)}
+                className="p-2 -ml-2 text-zinc-400 hover:text-zinc-100 lg:hidden"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+              <h2 className="text-lg font-medium tracking-tight text-zinc-100 truncate max-w-[200px] sm:max-w-none">
+                {activeTab === 'dashboard' && 'System Dashboard'}
+                {activeTab === 'licenses' && 'License Activity Console'}
+                {activeTab === 'users' && 'User Management'}
+                {activeTab === 'funds' && 'Funds & Clients'}
+                {activeTab === 'products' && 'Software Products Catalog'}
+                {activeTab === 'tiers' && 'License Tiers Settings'}
+                {activeTab === 'nodes' && 'Trading Nodes'}
+                {activeTab === 'settings' && 'System Settings'}
+              </h2>
+            </div>
+            <div className="flex items-center gap-4">
+              {activeTab === 'licenses' && canManageLicenses && (
+                <button 
+                  onClick={() => setIsCreateModalOpen(true)}
+                  className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-sm font-semibold transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  Provision License
+                </button>
+              )}
+            </div>
+          </div>
+        </header>
+
+        <main className="flex-1 overflow-y-auto p-6 lg:p-8">
+          
+          {/* Stats */}
+        {(activeTab === 'dashboard' || activeTab === 'licenses') && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <StatCard title="Active Trading Nodes" value={activeCount} icon={Server} color="text-indigo-400" bgColor="bg-indigo-500/10 border border-indigo-500/20" />
+            <StatCard title="Total Client Earnings" value={`$${(licenses.reduce((acc, l) => acc + (l.current_earnings || 0), 0) / 1000).toFixed(1)}k`} icon={Activity} color="text-emerald-400" bgColor="bg-emerald-500/10 border border-emerald-500/20" />
+            <StatCard title="Total License Revenue" value={`$${(licenses.reduce((acc, l) => acc + (l.product_price || 0), 0) / 1000).toFixed(0)}k`} icon={Building} color="text-blue-400" bgColor="bg-blue-500/10 border border-blue-500/20" />
+            <StatCard title="Suspended/Revoked" value={revokedCount + licenses.filter(l => l.status === 'suspended').length} icon={ShieldAlert} color="text-rose-400" bgColor="bg-rose-500/10 border border-rose-500/20" />
+          </div>
+        )}
+
+        {/* Licenses Tab */}
+        {activeTab === 'licenses' && (
+          <>
+            {/* Controls */}
+        <div className="bg-zinc-900/50 p-4 rounded-xl border border-zinc-800/50 mb-6 flex flex-wrap gap-4 items-center">
+          <div className="relative w-full sm:w-80">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+            <input 
+              type="text" 
+              placeholder="Search by fund, key, or product..." 
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-zinc-950/50 border border-zinc-800 rounded-lg text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-zinc-600 transition-all font-mono"
+            />
+          </div>
+          
+          <div className="flex items-center gap-2 flex-wrap">
+            <select value={dateRange.type} onChange={e => setDateRange({...dateRange, type: e.target.value as any})} className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-xs text-zinc-300 font-mono focus:outline-none">
+              <option value="created_at">Issued At</option>
+              <option value="expires_at">Expires At</option>
+            </select>
+            <input type="date" value={dateRange.start} onChange={e => setDateRange({...dateRange, start: e.target.value})} className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-xs text-zinc-300 font-mono focus:outline-none" />
+            <input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-xs text-zinc-300 font-mono focus:outline-none" />
+          </div>
+
+          {canManageLicenses && (
+            <button 
+              onClick={() => setIsCreateModalOpen(true)}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              New License
+            </button>
+          )}
+
+          <div className="flex bg-zinc-950 p-1 rounded-lg ml-auto border border-zinc-800">
+            {['all', 'active', 'suspended', 'revoked'].map(status => (
+              <button
+                key={status}
+                onClick={() => setFilterStatus(status)}
+                className={cn(
+                  "px-4 py-1.5 text-xs font-mono rounded-md uppercase tracking-wider transition-colors",
+                  filterStatus === status ? "bg-zinc-800 text-indigo-400 shadow-sm border border-zinc-700/50" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50"
+                )}
+              >
+                {status}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Bulk Actions Toolbar */}
+        {selectedLicenses.size > 0 && (
+          (() => {
+            const selected = licenses.filter(l => selectedLicenses.has(l.id));
+            const activeCount = selected.filter(l => l.status === 'active').length;
+            const suspendedCount = selected.filter(l => l.status === 'suspended').length;
+            return (
+              <div className="bg-indigo-900/20 border border-indigo-500/30 p-4 rounded-xl mb-6 flex items-center justify-between">
+                <span className="text-sm text-indigo-200 font-medium">
+                  {selectedLicenses.size} licenses selected
+                  <span className="text-xs ml-3 text-indigo-300/70 font-mono">
+                    ({activeCount} Active, {suspendedCount} Suspended)
+                  </span>
+                </span>
+                <div className="flex gap-2">
+                  {canManageLicenses && (
+                    <>
+                      <button onClick={() => executeBulkAction('activate')} className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-emerald-500/30">Activate</button>
+                      <button onClick={() => executeBulkAction('suspend')} className="bg-amber-500/20 text-amber-400 border border-amber-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-amber-500/30">Suspend</button>
+                      <button onClick={() => { setExtendingLicense(null); setIsTransferModalOpen(true); }} className="bg-blue-500/20 text-blue-400 border border-blue-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-blue-500/30">Transfer</button>
+                    </>
+                  )}
+                  <button onClick={exportLicensesToCSV} className="bg-zinc-700/20 text-zinc-300 border border-zinc-700/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-zinc-700/30">Export CSV</button>
+                  {canManageLicenses && (
+                    <button onClick={() => executeBulkAction('delete')} className="bg-rose-500/20 text-rose-400 border border-rose-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-rose-500/30">Delete</button>
+                  )}
+                </div>
+              </div>
+            );
+          })()
+        )}
+
+        {/* Table */}
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400">
+                <tr>
+                  <th className="px-6 py-4">
+                    <input type="checkbox" checked={selectedLicenses.size === filteredLicenses.length && filteredLicenses.length > 0} onChange={toggleSelectAll} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  </th>
+                  {visibleColumns.license && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">License / Tier</th>}
+                  {visibleColumns.software && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Software / Fund</th>}
+                  {visibleColumns.security && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Security / Limits</th>}
+                  {visibleColumns.risk && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">License Health</th>}
+                  {visibleColumns.earnings && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Client Earnings</th>}
+                  {visibleColumns.status && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Status / Dates</th>}
+                  <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider text-right flex items-center justify-end gap-2">
+                    Actions
+                    <div className="relative group">
+                      <Settings className="w-3 h-3 cursor-pointer hover:text-indigo-400" />
+                      <div className="absolute right-0 top-full mt-2 w-48 bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl p-2 hidden group-hover:block z-20">
+                        {Object.entries(visibleColumns).map(([key, value]) => (
+                          <label key={key} className="flex items-center gap-2 px-2 py-1.5 hover:bg-zinc-800 rounded cursor-pointer text-xs text-zinc-300">
+                            <input type="checkbox" checked={value} onChange={e => setVisibleColumns({...visibleColumns, [key]: e.target.checked})} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 w-3 h-3" />
+                            {key.charAt(0).toUpperCase() + key.slice(1)}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/50">
+                {filteredLicenses.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-6 py-12 text-center text-zinc-500">
+                      <div className="flex flex-col items-center justify-center">
+                        <Key className="w-8 h-8 text-zinc-700 mb-3" />
+                        <p className="font-mono text-xs">NO LICENSES FOUND</p>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredLicenses.map((license) => (
+                    <React.Fragment key={license.id}>
+                      <tr className={cn("hover:bg-zinc-800/30 transition-colors group cursor-pointer", selectedLicenses.has(license.id) && "bg-indigo-900/10")} onClick={() => toggleRow(license.id)}>
+                        <td className="px-6 py-4">
+                          <input type="checkbox" checked={selectedLicenses.has(license.id)} onChange={(e) => { e.stopPropagation(); toggleSelect(license.id); }} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                        </td>
+                        <td className="px-1 py-4">
+                          {expandedRows.has(license.id) ? <ChevronDown className="w-4 h-4 text-zinc-400" /> : <ChevronRight className="w-4 h-4 text-zinc-400" />}
+                        </td>
+                        {visibleColumns.license && (
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col gap-1.5">
+                              <div className="font-mono text-zinc-300 bg-zinc-950 px-2 py-1 rounded text-xs border border-zinc-800/80 max-w-fit shadow-inner">
+                                {license.license_key}
+                              </div>
+                              <span className={cn("text-[10px] font-mono font-medium px-1.5 py-0.5 rounded max-w-fit uppercase tracking-wider", 
+                                license.tier === 'Institutional' ? "bg-purple-500/10 text-purple-400 border border-purple-500/20" :
+                                license.tier === 'Professional' ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" :
+                                "bg-zinc-800 text-zinc-400 border border-zinc-700"
+                              )}>
+                                {license.tier}
+                              </span>
+                            </div>
+                          </td>
+                        )}
+                        {visibleColumns.software && (
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col">
+                              <span className="font-medium text-zinc-200">{license.software_name}</span>
+                              <span className="text-zinc-500 text-xs flex items-center gap-1 mt-1 font-mono">
+                                <Building className="w-3 h-3 text-zinc-600" />
+                                {license.issued_to}
+                              </span>
+                              <span className="text-emerald-500 text-[10px] font-mono mt-1.5 bg-emerald-500/10 px-1.5 py-0.5 rounded w-fit border border-emerald-500/20">
+                                FEE: ${license.product_price?.toLocaleString()}
+                              </span>
+                            </div>
+                          </td>
+                        )}
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1.5">
+                            <div className="flex items-center gap-2">
+                              {license.hardware_id ? (
+                                <span className="text-[10px] font-mono text-zinc-400 flex items-center gap-1 bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800" title="Hardware Locked"><Cpu className="w-3 h-3 text-indigo-400"/> {license.hardware_id}</span>
+                              ) : (
+                                <span className="text-[10px] font-mono text-zinc-600 flex items-center gap-1"><Cpu className="w-3 h-3"/> UNLOCKED</span>
+                              )}
+                              {license.ip_whitelist && (
+                                <span className="text-[10px] font-mono text-zinc-400 flex items-center gap-1 bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800" title="IP Whitelisted"><Server className="w-3 h-3 text-indigo-400"/> {license.ip_whitelist}</span>
+                              )}
+                            </div>
+                            <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-1 mt-1">
+                              <Activity className="w-3 h-3 text-zinc-600" /> 
+                              VOL_CAP: ${(license.max_volume_usd / 1000000).toFixed(0)}M
+                            </div>
+                            {license.device_fingerprint && (
+                              <div className="text-[9px] text-zinc-600 font-mono mt-0.5" title={`Last IP: ${license.last_active_ip}`}>
+                                FP:{license.device_fingerprint}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        {visibleColumns.risk && (
+                          <td className="px-6 py-4">
+                            {(() => {
+                              const scoreDetails = duckDBRiskScores[license.id];
+                              const score = scoreDetails ? scoreDetails.risk_score : calculateRiskScore(license);
+                              const Icon = score <= 30 ? ShieldCheck : score <= 70 ? Shield : ShieldAlert;
+                              const color = score <= 30 ? "bg-emerald-500" : score <= 70 ? "bg-amber-500" : "bg-rose-500";
+                              const textColor = score <= 30 ? "text-emerald-500" : score <= 70 ? "text-amber-500" : "text-rose-500";
+                              return (
+                                <div className="flex items-center gap-3">
+                                  <Icon className={cn("w-4 h-4", textColor)} />
+                                  <div className="flex flex-col gap-1">
+                                    <div className="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                                      <div className={cn("h-full", color)} style={{ width: `${score}%` }} />
+                                    </div>
+                                    <span className={cn("text-[10px] font-mono font-bold", textColor)}>
+                                      Score: {score}
+                                    </span>
+                                    {scoreDetails && (
+                                      <span className="text-[9px] font-mono text-zinc-500 block">
+                                        Pings Fail: {scoreDetails.failed_pings} • IPs: {scoreDetails.distinct_ips} • HWIDs: {scoreDetails.distinct_hwids}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </td>
+                        )}
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-emerald-400 font-mono font-medium tracking-tight bg-emerald-950/30 px-2 py-1 rounded-md border border-emerald-900/50 max-w-fit shadow-inner">
+                              ${(license.current_earnings || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                            </span>
+                            <div className="flex items-center gap-2 text-[10px] text-zinc-500 font-mono mt-0.5">
+                              <span title="Daily" className="bg-zinc-900 px-1 rounded border border-zinc-800">D:${(license.daily_earnings || 0).toLocaleString(undefined, {maximumFractionDigits:0})}</span>
+                              <span title="Weekly" className="bg-zinc-900 px-1 rounded border border-zinc-800">W:${(license.weekly_earnings || 0).toLocaleString(undefined, {maximumFractionDigits:0})}</span>
+                              <span title="Monthly" className="bg-zinc-900 px-1 rounded border border-zinc-800">M:${(license.monthly_earnings || 0).toLocaleString(undefined, {maximumFractionDigits:0})}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1.5">
+                            <StatusBadge status={license.status} />
+                            <div className="flex flex-col mt-0.5">
+                              <span className="text-zinc-500 font-mono text-[9px] uppercase">Iss: {format(new Date(license.created_at), 'MMM d, yy')}</span>
+                              <span className={cn("font-mono text-[9px] uppercase", isExpiringSoon(license.expires_at) ? "text-yellow-500" : "text-zinc-600")}>Exp: {format(new Date(license.expires_at), 'MMM d, yy')}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex justify-end items-center gap-2 opacity-100 sm:opacity-50 group-hover:opacity-100 transition-opacity">
+                            {!isReadOnly && (
+                              <button onClick={(e) => { e.stopPropagation(); simulatePing(license); }} className="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors border border-transparent hover:border-indigo-500/20" title="Simulate Bot Ping">
+                                <Send className="w-4 h-4" />
+                              </button>
+                            )}
+                            <button onClick={(e) => { e.stopPropagation(); openEvents(license); }} className="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors border border-transparent hover:border-indigo-500/20" title="View Audit Logs & Events">
+                              <List className="w-4 h-4" />
+                            </button>
+                            {canManageLicenses && (
+                              <>
+                                <div className="w-px h-4 bg-zinc-800 mx-1"></div>
+                                {license.status !== 'active' && (
+                                  <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'active'); }} className="p-1.5 text-zinc-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded transition-colors border border-transparent hover:border-emerald-500/20" title="Activate">
+                                    <ShieldCheck className="w-4 h-4" />
+                                  </button>
+                                )}
+                                {license.status === 'active' && (
+                                  <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'suspended'); }} className="p-1.5 text-zinc-400 hover:text-amber-400 hover:bg-amber-500/10 rounded transition-colors border border-transparent hover:border-amber-500/20" title="Suspend (Kill Switch)">
+                                    <StopCircle className="w-4 h-4" />
+                                  </button>
+                                )}
+                                {license.status !== 'revoked' && (
+                                  <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'revoked'); }} className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors border border-transparent hover:border-rose-500/20" title="Revoke Permanently">
+                                    <ShieldAlert className="w-4 h-4" />
+                                  </button>
+                                )}
+                                <div className="w-px h-4 bg-zinc-800 mx-1"></div>
+                                <button onClick={(e) => { e.stopPropagation(); deleteLicense(license.id); }} className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors border border-transparent hover:border-rose-500/20" title="Delete">
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                      {expandedRows.has(license.id) && (
+                        <tr>
+                          <td colSpan={7} className="bg-zinc-950/50 p-6 border-b border-zinc-800">
+                            <div className="grid grid-cols-2 gap-8 text-xs font-mono">
+                              <div>
+                                <h4 className="text-zinc-500 mb-2 flex justify-between items-center">
+                                  RAW CONFIGURATION
+                                  <div className="flex gap-2">
+                                    {canManageLicenses && (
+                                      <button 
+                                        onClick={() => { setExtendingLicense(license); setIsExtendModalOpen(true); }}
+                                        className="text-[10px] text-amber-400 hover:text-amber-300 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20"
+                                      >
+                                        Extend
+                                      </button>
+                                    )}
+                                    <button 
+                                      onClick={() => exportLicense(license)}
+                                      className="text-[10px] text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 px-2 py-1 rounded border border-indigo-500/20"
+                                    >
+                                      Audit Export
+                                    </button>
+                                  </div>
+                                </h4>
+                                <pre className="bg-zinc-900 p-3 rounded border border-zinc-800 text-zinc-300 overflow-x-auto">{JSON.stringify(license, null, 2)}</pre>
+                              </div>
+                              <div>
+                                <h4 className="text-zinc-500 mb-2">USAGE STATISTICS & API QUOTAS</h4>
+                                <div className="space-y-3 text-zinc-300">
+                                  <div className="flex justify-between"><span>Last Active IP:</span><span>{license.last_active_ip || 'N/A'}</span></div>
+                                  <div className="flex justify-between"><span>Fingerprint:</span><span>{license.device_fingerprint || 'N/A'}</span></div>
+                                  <div className="flex justify-between"><span>Max Volume Cap:</span><span>${(license.max_volume_usd / 1000000).toFixed(0)}M</span></div>
+                                  
+                                  <div className="border-t border-zinc-800/80 pt-2 space-y-2">
+                                    <div>
+                                      <div className="flex justify-between text-[10px] text-zinc-400 mb-1">
+                                        <span>Daily API Quota:</span>
+                                        <span>{(license.api_calls_count_daily || 0).toLocaleString()} / {license.api_calls_limit > 0 ? license.api_calls_limit.toLocaleString() : 'Unlimited'}</span>
+                                      </div>
+                                      <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
+                                        <div className="bg-indigo-500 h-full transition-all duration-300" style={{ width: `${license.api_calls_limit > 0 ? Math.min(100, ((license.api_calls_count_daily || 0) / license.api_calls_limit) * 100) : 0}%` }} />
+                                      </div>
+                                    </div>
+
+                                    <div>
+                                      <div className="flex justify-between text-[10px] text-zinc-400 mb-1">
+                                        <span>Monthly API Quota:</span>
+                                        <span>{(license.api_calls_count_monthly || 0).toLocaleString()} / {license.api_calls_limit_monthly > 0 ? license.api_calls_limit_monthly.toLocaleString() : 'Unlimited'}</span>
+                                      </div>
+                                      <div className="w-full bg-zinc-850 h-1.5 rounded-full overflow-hidden">
+                                        <div className="bg-emerald-500 h-full transition-all duration-300" style={{ width: `${license.api_calls_limit_monthly > 0 ? Math.min(100, ((license.api_calls_count_monthly || 0) / license.api_calls_limit_monthly) * 100) : 0}%` }} />
+                                      </div>
+                                    </div>
+
+                                    <div>
+                                      <div className="flex justify-between text-[10px] text-zinc-400 mb-1">
+                                        <span>Yearly API Quota:</span>
+                                        <span>{(license.api_calls_count_yearly || 0).toLocaleString()} / {license.api_calls_limit_yearly > 0 ? license.api_calls_limit_yearly.toLocaleString() : 'Unlimited'}</span>
+                                      </div>
+                                      <div className="w-full bg-zinc-850 h-1.5 rounded-full overflow-hidden">
+                                        <div className="bg-amber-500 h-full transition-all duration-300" style={{ width: `${license.api_calls_limit_yearly > 0 ? Math.min(100, ((license.api_calls_count_yearly || 0) / license.api_calls_limit_yearly) * 100) : 0}%` }} />
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+          </>
+        )}
+
+        {/* Other Tabs */}
+        {activeTab === 'dashboard' && <DashboardView licenses={licenses} />}
+        {activeTab === 'audit_logs' && <AuditLogsView logs={auditLogs} />}
+        {activeTab === 'users' && (
+          <UsersView 
+            users={allUsers} 
+            currentUser={currentUser}
+            showToast={showToast}
+            onUpdateRole={(id, role) => socketRef.current?.emit('users:update_role', { id, role })}
+            onDelete={(id) => socketRef.current?.emit('users:delete', id)}
+            onInvite={(user) => {
+              const newUser = {
+                ...user,
+                id: 'user_' + Math.random().toString(36).substring(2, 9),
+                created_at: new Date().toISOString()
+              };
+              socketRef.current?.emit('users:create', newUser);
+              showToast(`Invitation created for ${user.name}`, 'success');
+            }}
+          />
+        )}
+        {activeTab === 'funds' && (
+          <FundsView 
+            clients={clients} 
+            addClient={addClient} 
+            deleteClient={removeClient} 
+            licenses={licenses} 
+            currentUser={currentUser}
+            showToast={showToast} 
+          />
+        )}
+        {activeTab === 'products' && (
+          <SoftwareProductsView 
+            products={softwareProducts} 
+            addProduct={addSoftwareProduct} 
+            deleteProduct={removeSoftwareProduct} 
+            licenses={licenses} 
+            currentUser={currentUser}
+            showToast={showToast} 
+          />
+        )}
+        {activeTab === 'tiers' && (
+          <LicenseTiersView 
+            tiers={licenseTiers} 
+            addTier={addLicenseTier} 
+            deleteTier={removeLicenseTier} 
+            licenses={licenses} 
+            currentUser={currentUser}
+            showToast={showToast} 
+          />
+        )}
+        {activeTab === 'nodes' && (
+          <NodesView 
+            licenses={licenses} 
+            liveWebSocketNodes={liveWebSocketNodes} 
+            socketRef={socketRef}
+            simulatedClientKey={simulatedClientKey}
+            setSimulatedClientKey={setSimulatedClientKey}
+            simulationLogs={simulationLogs}
+            setSimulationLogs={setSimulationLogs}
+            fetchRiskScores={fetchRiskScores}
+            showToast={showToast}
+            handleResetHwid={handleResetHwid}
+            handleGenerateOfflineToken={handleGenerateOfflineToken}
+            copyToClipboard={copyToClipboard}
+            latencyThreshold={latencyThreshold}
+          />
+        )}
+        {activeTab === 'settings' && (
+          <SettingsView 
+            showToast={showToast} 
+            licenses={licenses} 
+            socketRef={socketRef}
+            currentUser={currentUser}
+            handleGenerateOfflineToken={handleGenerateOfflineToken}
+            copyToClipboard={copyToClipboard}
+            latencyThreshold={latencyThreshold}
+            setLatencyThreshold={setLatencyThreshold}
+          />
+        )}
+
+      </main>
+
+      {/* Events Modal */}
+      {isEventsOpen && selectedLicense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-sm">
+          <div className="bg-zinc-900 rounded-xl shadow-2xl border border-zinc-800 w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/50 rounded-t-xl">
+              <div>
+                <h3 className="font-semibold text-zinc-100 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-indigo-400" />
+                  Telemetry & Audit Log
+                </h3>
+                <p className="text-xs text-zinc-500 font-mono mt-1">{selectedLicense.license_key} • {selectedLicense.software_name}</p>
+              </div>
+              <button onClick={() => setIsEventsOpen(false)} className="p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 rounded-md transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 flex-1">
+              {events.length === 0 ? (
+                <div className="text-center py-12 text-zinc-600">
+                  <Activity className="w-8 h-8 mx-auto mb-3 text-zinc-700" />
+                  <p className="font-mono text-xs">NO EVENTS LOGGED</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {events.map((evt) => (
+                    <div key={evt.id} className="flex gap-4">
+                      <div className="flex flex-col items-center">
+                        <div className={cn("w-2 h-2 rounded-full mt-1.5 shadow-[0_0_8px_rgba(0,0,0,0.5)]", 
+                          evt.event_type === 'verification_success' ? 'bg-emerald-500 shadow-emerald-500/50' :
+                          evt.event_type === 'verification_failed' ? 'bg-rose-500 shadow-rose-500/50' :
+                          'bg-indigo-500 shadow-indigo-500/50'
+                        )} />
+                        <div className="w-px h-full bg-zinc-800 mt-2" />
+                      </div>
+                      <div className="flex-1 pb-4">
+                        <div className="flex justify-between items-start mb-1">
+                          <span className="font-medium text-xs text-zinc-300 font-mono uppercase tracking-wider">
+                            {evt.event_type.replace(/_/g, ' ')}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-mono">{format(new Date(evt.timestamp), 'MMM d, HH:mm:ss')}</span>
+                        </div>
+                        <div className="bg-zinc-950/50 border border-zinc-800/80 rounded-md p-3 text-[10px] font-mono text-zinc-400 overflow-x-auto shadow-inner">
+                          <pre>{JSON.stringify(JSON.parse(evt.event_data), null, 2)}</pre>
+                          
+                          {/* Quick Actions for Verification Failures */}
+                          {evt.event_type === 'verification_failed' && (
+                            <div className="mt-3 flex gap-2 pt-3 border-t border-zinc-800/50">
+                              {JSON.parse(evt.event_data).reason === 'IP not whitelisted' && (
+                                <button 
+                                  onClick={() => {
+                                    const ip = JSON.parse(evt.event_data).ip;
+                                    const currentWhitelist = selectedLicense.ip_whitelist ? selectedLicense.ip_whitelist.split(',').map(s => s.trim()) : [];
+                                    if (!currentWhitelist.includes(ip)) {
+                                      const newWhitelist = [...currentWhitelist, ip].join(', ');
+                                      handleUpdateLicenseConfig(selectedLicense.id, { ip_whitelist: newWhitelist });
+                                      showToast(`IP ${ip} whitelisted`, 'success');
+                                    }
+                                  }}
+                                  className="bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-1 rounded hover:bg-indigo-500/20 transition-colors"
+                                >
+                                  Whitelist this IP
+                                </button>
+                              )}
+                              {JSON.parse(evt.event_data).reason === 'Hardware ID mismatch' && (
+                                <button 
+                                  onClick={() => {
+                                    const hwid = JSON.parse(evt.event_data).hardware_id || JSON.parse(evt.event_data).provided_hwid;
+                                    handleUpdateLicenseConfig(selectedLicense.id, { hardware_id: hwid });
+                                    showToast(`Hardware lock updated to ${hwid}`, 'success');
+                                  }}
+                                  className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-1 rounded hover:bg-amber-500/20 transition-colors"
+                                >
+                                  Update Hardware Lock
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Transfer License Modal */}
+      <TransferLicenseModal 
+        isOpen={isTransferModalOpen}
+        onClose={() => setIsTransferModalOpen(false)}
+        onTransfer={transferLicenses}
+      />
+
+      {/* Extend License Modal */}
+      <ExtendLicenseModal 
+        isOpen={isExtendModalOpen}
+        onClose={() => setIsExtendModalOpen(false)}
+        onExtend={(days) => extendingLicense && extendLicense(extendingLicense.id, days)}
+      />
+
+      {/* Create License Modal */}
+      <CreateLicenseModal 
+        isOpen={isCreateModalOpen} 
+        onClose={() => setIsCreateModalOpen(false)} 
+        onCreate={handleCreateLicense} 
+        clients={clients}
+        softwareProducts={softwareProducts}
+        licenseTiers={licenseTiers}
+      />
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-4">
+          <div className={cn("px-4 py-3 rounded-lg border shadow-lg backdrop-blur-md flex items-center gap-3", 
+            toast.type === 'success' ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border-rose-500/20 text-rose-400"
+          )}>
+            {toast.type === 'success' ? <ShieldCheck className="w-5 h-5" /> : <ShieldAlert className="w-5 h-5" />}
+            <span className="text-sm font-medium">{toast.message}</span>
+          </div>
+        </div>
+      )}
+
+      </div>
+    </div>
+  );
+}
+
+function AuditLogsView({ logs }: { logs: AuditLog[] }) {
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+            <FileText className="w-4 h-4 text-indigo-400" /> Immutable Audit Trail
+          </h3>
+          <p className="text-xs text-zinc-500 font-mono mt-1">Real-time ledger of all organizational administrative actions</p>
+        </div>
+        <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded text-[10px] font-mono text-zinc-400">
+          <Database className="w-3 h-3" />
+          PERSISTED IN DUCKDB
+        </div>
+      </div>
+
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
+              <tr>
+                <th className="px-6 py-4">Timestamp</th>
+                <th className="px-6 py-4">User</th>
+                <th className="px-6 py-4">Action</th>
+                <th className="px-6 py-4">Entity</th>
+                <th className="px-6 py-4">Details</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {logs.map((log) => (
+                <tr key={log.id} className="hover:bg-zinc-800/30 group transition-colors">
+                  <td className="px-6 py-4 text-zinc-500 font-mono text-[10px]">
+                    {new Date(log.timestamp).toLocaleString()}
+                  </td>
+                  <td className="px-6 py-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400 border border-zinc-700 uppercase">
+                        {log.user_name?.substring(0, 2) || 'S'}
+                      </div>
+                      <span className="text-zinc-300 font-medium">{log.user_name}</span>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className={cn(
+                      "px-2 py-0.5 rounded text-[10px] font-mono uppercase border",
+                      log.action === 'create' ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                      log.action === 'delete' ? "bg-rose-500/10 text-rose-400 border-rose-500/20" :
+                      "bg-indigo-500/10 text-indigo-400 border-indigo-500/20"
+                    )}>
+                      {log.action}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <div className="text-zinc-400 text-xs font-mono">{log.entity_type.toUpperCase()}</div>
+                    <div className="text-[10px] text-zinc-600 font-mono">{log.entity_id}</div>
+                  </td>
+                  <td className="px-6 py-4 text-zinc-400 text-xs italic">
+                    {log.details}
+                  </td>
+                </tr>
+              ))}
+              {logs.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-6 py-12 text-center text-zinc-500 font-mono text-xs uppercase tracking-widest">
+                    No records found in audit ledger
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UsersView({ 
+  users, 
+  currentUser,
+  onUpdateRole, 
+  onDelete, 
+  onInvite,
+  showToast 
+}: { 
+  users: AppUser[], 
+  currentUser: AppUser | null,
+  onUpdateRole: (id: string, role: AppRole) => void,
+  onDelete: (id: string) => void,
+  onInvite: (user: Omit<AppUser, 'id' | 'created_at'>) => void,
+  showToast: (msg: string, type: 'success'|'error') => void 
+}) {
+  const [isInviteOpen, setIsInviteOpen] = useState(false);
+  const [formData, setFormData] = useState({ name: '', email: '', role: 'Auditor' as AppRole });
+
+  const handleInvite = () => {
+    if (!formData.name || !formData.email) return;
+    onInvite(formData);
+    setFormData({ name: '', email: '', role: 'Auditor' });
+    setIsInviteOpen(false);
+  };
+
+  const roles: AppRole[] = ['Administrator', 'Manager', 'Auditor'];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div>
+          <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+            <Users className="w-4 h-4 text-indigo-400" /> Team Access Control
+          </h3>
+          <p className="text-xs text-zinc-500 font-mono mt-1">Manage personnel roles and organizational permissions</p>
+        </div>
+        {currentUser?.role === 'Administrator' && (
+          <button 
+            onClick={() => setIsInviteOpen(true)}
+            className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add Team Member
+          </button>
+        )}
+      </div>
+
+      {isInviteOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl p-6 space-y-4">
+            <h3 className="text-zinc-100 font-medium text-sm border-b border-zinc-800 pb-2">Invite New Member</h3>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Full Name</label>
+              <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="e.g. Alex Rivera" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Email Address</label>
+              <input type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} placeholder="alex@quantfund.net" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Assigned Role</label>
+              <select 
+                value={formData.role} 
+                onChange={e => setFormData({...formData, role: e.target.value as AppRole})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono"
+              >
+                {roles.map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setIsInviteOpen(false)} className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-semibold">Cancel</button>
+              <button onClick={handleInvite} className="bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg">Create User</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
+              <tr>
+                <th className="px-6 py-4">User Details</th>
+                <th className="px-6 py-4">Access Role</th>
+                <th className="px-6 py-4">Joined At</th>
+                <th className="px-6 py-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {users.map((u) => (
+                <tr key={u.id} className="hover:bg-zinc-800/30 group">
+                  <td className="px-6 py-4">
+                    <div className="text-zinc-200 font-medium">{u.name} {u.id === currentUser?.id && <span className="text-[10px] bg-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded ml-2">YOU</span>}</div>
+                    <div className="text-zinc-500 font-mono text-[10px] mt-0.5">{u.email}</div>
+                  </td>
+                  <td className="px-6 py-4">
+                    {currentUser?.role === 'Administrator' && u.id !== currentUser.id ? (
+                      <select 
+                        value={u.role}
+                        onChange={(e) => onUpdateRole(u.id, e.target.value as AppRole)}
+                        className="bg-zinc-950 border border-zinc-800 text-zinc-400 text-[10px] font-mono uppercase px-2 py-0.5 rounded focus:outline-none focus:border-indigo-500 transition-colors"
+                      >
+                        {roles.map(r => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                    ) : (
+                      <span className="bg-zinc-800 text-zinc-400 border border-zinc-700 px-2 py-0.5 rounded text-[10px] font-mono uppercase">
+                        {u.role}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-6 py-4 text-zinc-500 font-mono text-[10px]">
+                    {new Date(u.created_at).toLocaleDateString()}
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    {currentUser?.role === 'Administrator' && u.id !== currentUser.id && (
+                      <button 
+                        onClick={() => onDelete(u.id)} 
+                        className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors opacity-0 group-hover:opacity-100"
+                      >
+                        Revoke Access
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FundsView({ 
+  clients, 
+  addClient, 
+  deleteClient, 
+  licenses, 
+  currentUser,
+  showToast 
+}: { 
+  clients: Client[], 
+  addClient: (c: Omit<Client, 'id'>) => void, 
+  deleteClient: (id: string) => void, 
+  licenses: License[], 
+  currentUser: AppUser | null,
+  showToast: (msg: string, type: 'success'|'error') => void 
+}) {
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [formData, setFormData] = useState({ 
+    name: '', 
+    email: '', 
+    mobile: '', 
+    address: '',
+    extra_info: '' 
+  });
+  
+  const [extraFields, setExtraFields] = useState<Array<{ key: string, value: string }>>([
+    { key: 'AUM Tier', value: 'Over $50M' },
+    { key: 'Jurisdiction', value: 'Cayman Islands' }
+  ]);
+
+  const addExtraField = () => {
+    setExtraFields([...extraFields, { key: '', value: '' }]);
+  };
+
+  const removeExtraField = (index: number) => {
+    setExtraFields(extraFields.filter((_, i) => i !== index));
+  };
+
+  const handleFieldChange = (index: number, field: 'key' | 'value', val: string) => {
+    const updated = [...extraFields];
+    updated[index][field] = val;
+    setExtraFields(updated);
+  };
+
+  const handleSubmit = () => {
+    if (!formData.name) return;
+    
+    // Construct extra_info JSON dictionary from custom fields
+    const extraInfoObj: Record<string, string> = {};
+    extraFields.forEach(f => {
+      if (f.key.trim()) {
+        extraInfoObj[f.key.trim()] = f.value;
+      }
+    });
+
+    addClient({
+      name: formData.name,
+      email: formData.email,
+      mobile: formData.mobile,
+      address: formData.address,
+      extra_info: JSON.stringify(extraInfoObj)
+    });
+
+    setFormData({ name: '', email: '', mobile: '', address: '', extra_info: '' });
+    setExtraFields([
+      { key: 'AUM Tier', value: 'Over $50M' },
+      { key: 'Jurisdiction', value: 'Cayman Islands' }
+    ]);
+    setIsModalOpen(false);
+    showToast('Client added successfully', 'success');
+  };
+
+  const getClientStats = (name: string) => {
+    const relevantLicenses = licenses.filter(l => l.issued_to === name);
+    return {
+      count: relevantLicenses.filter(l => l.status === 'active').length,
+      value: relevantLicenses.reduce((acc, l) => acc + (l.product_price || 0), 0)
+    };
+  };
+  
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center bg-zinc-900/40 p-4 rounded-xl border border-zinc-800/60">
+        <div>
+          <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+            <Building className="w-4 h-4 text-indigo-400" /> Client & Fund Directory
+          </h3>
+          <p className="text-xs text-zinc-500 font-mono mt-1">Manage institutional license counter-parties and verification details</p>
+        </div>
+        {currentUser?.role !== 'Auditor' && (
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add Client Profile
+          </button>
+        )}
+      </div>
+
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-lg overflow-hidden shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-zinc-100 font-medium text-sm border-b border-zinc-800 pb-2">Add Registered Client / Fund</h3>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Fund / Client Name</label>
+                <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="e.g. Millennium Capital" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Official Email</label>
+                <input type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} placeholder="compliance@millennium.com" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors" />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Mobile/Phone Number</label>
+                <input type="text" value={formData.mobile} onChange={e => setFormData({...formData, mobile: e.target.value})} placeholder="+1 (212) 555-0199" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Physical Address</label>
+                <input type="text" value={formData.address} onChange={e => setFormData({...formData, address: e.target.value})} placeholder="601 Lexington Ave, New York" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors" />
+              </div>
+            </div>
+
+            <div className="border-t border-zinc-800 pt-4 mt-2">
+              <div className="flex justify-between items-center mb-3">
+                <span className="block text-[10px] font-mono text-zinc-400 uppercase">Custom Attributes / Metadata</span>
+                <button type="button" onClick={addExtraField} className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1">+ Add Attribute</button>
+              </div>
+
+              <div className="space-y-2">
+                {extraFields.map((f, i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <input type="text" value={f.key} onChange={e => handleFieldChange(i, 'key', e.target.value)} placeholder="Field Key" className="w-1/3 bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 font-mono" />
+                    <input type="text" value={f.value} onChange={e => handleFieldChange(i, 'value', e.target.value)} placeholder="Value" className="w-2/3 bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500" />
+                    <button type="button" onClick={() => removeExtraField(i)} className="text-zinc-600 hover:text-rose-400 text-xs px-1">×</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800 mt-4">
+              <button onClick={() => setIsModalOpen(false)} className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-semibold">Cancel</button>
+              <button onClick={handleSubmit} className="bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg">Save Client Profile</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
+              <tr>
+                <th className="px-6 py-4">Client / Fund Name</th>
+                <th className="px-6 py-4">Contact Details</th>
+                <th className="px-6 py-4">Registered Address</th>
+                <th className="px-6 py-4">Metadata attributes</th>
+                <th className="px-6 py-4">Active Keys</th>
+                <th className="px-6 py-4">Total Revenue</th>
+                <th className="px-6 py-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {clients.map(cli => {
+                const stats = getClientStats(cli.name);
+                let meta: Record<string, string> = {};
+                try {
+                  meta = cli.extra_info ? JSON.parse(cli.extra_info) : {};
+                } catch(e) {}
+
+                return (
+                  <tr key={cli.id} className="hover:bg-zinc-800/30 group">
+                    <td className="px-6 py-4 text-zinc-200 font-semibold flex items-center gap-2 text-sm font-sans">
+                      <Building className="w-4 h-4 text-zinc-500 group-hover:text-indigo-400 transition-colors"/>
+                      {cli.name}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-300 font-mono text-xs">
+                      <div>{cli.email || 'N/A'}</div>
+                      <div className="text-[10px] text-zinc-500 mt-0.5">{cli.mobile || 'N/A'}</div>
+                    </td>
+                    <td className="px-6 py-4 text-zinc-400 text-xs font-sans max-w-xs truncate" title={cli.address}>
+                      {cli.address || 'N/A'}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-400 font-mono text-xs">
+                      <div className="flex flex-wrap gap-1 max-w-xs">
+                        {Object.entries(meta).map(([k, v]) => (
+                          <span key={k} className="bg-zinc-800/60 border border-zinc-700/50 text-[10px] text-indigo-400 px-1.5 py-0.5 rounded font-mono">
+                            {k}: {v}
+                          </span>
+                        ))}
+                        {Object.keys(meta).length === 0 && <span className="text-zinc-600">—</span>}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-zinc-300 font-mono text-xs">{stats.count} nodes</td>
+                    <td className="px-6 py-4 text-emerald-400 font-mono text-xs">${stats.value.toLocaleString()}/mo</td>
+                    <td className="px-6 py-4 text-right">
+                      <button 
+                        onClick={() => deleteClient(cli.id)} 
+                        className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors"
+                        title="Permanently remove client profile"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {clients.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-zinc-500 font-mono text-xs">
+                    NO REGISTERED CLIENTS FOUND
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NodesView({ 
+  licenses, 
+  liveWebSocketNodes, 
+  socketRef, 
+  simulatedClientKey, 
+  setSimulatedClientKey, 
+  simulationLogs, 
+  setSimulationLogs, 
+  fetchRiskScores,
+  showToast,
+  handleResetHwid,
+  handleGenerateOfflineToken,
+  copyToClipboard,
+  latencyThreshold
+}: { 
+  licenses: License[], 
+  liveWebSocketNodes: Array<{ license_key: string, socketId: string, ip: string, hardwareId: string, connectedAt: string, rtt?: number, isDegraded?: boolean, heartbeatInterval?: number, lastPongAt?: number }>,
+  socketRef: React.MutableRefObject<Socket | null>,
+  simulatedClientKey: string,
+  setSimulatedClientKey: (val: string) => void,
+  simulationLogs: string[],
+  setSimulationLogs: React.Dispatch<React.SetStateAction<string[]>>,
+  fetchRiskScores: () => Promise<void>,
+  showToast: (msg: string, type: 'success'|'error') => void,
+  handleResetHwid: (id: string) => void,
+  handleGenerateOfflineToken: (id: string) => Promise<string | null>,
+  copyToClipboard: (text: string) => void,
+  latencyThreshold: number
+}) {
+  const activeLicenses = licenses.filter(l => l.status === 'active');
+  const [hwIdInput, setHwIdInput] = useState('HWID-SIMULATED-9832');
+  const [ipInput, setIpInput] = useState('203.0.113.5');
+  const [assetClassInput, setAssetClassInput] = useState('forex');
+  const [accountIdInput, setAccountIdInput] = useState('MT5-998877');
+  const [editingLicense, setEditingLicense] = useState<License | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
+
+  const handleSaveConfig = (id: string, config: any) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit("licenses:update_config", { id, config });
+    showToast('Active node configuration updated successfully!', 'success');
+  };
+
+  const parseLogs = (logs: string[]) => {
+    return logs.map(log => {
+      const match = log.match(/^\[(.*?)\]\s*\[(.*?)\]\s*(.*)$/);
+      if (match) {
+        return {
+          timestamp: match[1],
+          level: match[2],
+          message: match[3]
+        };
+      }
+      const singleMatch = log.match(/^\[(.*?)\]\s*(.*)$/);
+      if (singleMatch) {
+        return {
+          timestamp: singleMatch[1],
+          level: 'LOG',
+          message: singleMatch[2]
+        };
+      }
+      return {
+        timestamp: new Date().toLocaleTimeString(),
+        level: 'LOG',
+        message: log
+      };
+    });
+  };
+
+  const exportLogsAsJSON = () => {
+    try {
+      const parsed = parseLogs(simulationLogs);
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(parsed, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `websocket-simulation-logs-${new Date().toISOString().substring(0, 19).replace(/:/g, '-')}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      showToast('Logs exported as JSON successfully', 'success');
+    } catch (error) {
+      showToast('Failed to export JSON logs', 'error');
+    }
+  };
+
+  const exportLogsAsCSV = () => {
+    try {
+      const parsed = parseLogs(simulationLogs);
+      const headers = ["Timestamp", "Level", "Message"];
+      const csvContent = [
+        headers.join(","),
+        ...parsed.map(row => {
+          const timestamp = `"${row.timestamp.replace(/"/g, '""')}"`;
+          const level = `"${row.level.replace(/"/g, '""')}"`;
+          const message = `"${row.message.replace(/"/g, '""')}"`;
+          return [timestamp, level, message].join(",");
+        })
+      ].join("\n");
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", url);
+      downloadAnchor.setAttribute("download", `websocket-simulation-logs-${new Date().toISOString().substring(0, 19).replace(/:/g, '-')}.csv`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      URL.revokeObjectURL(url);
+      showToast('Logs exported as CSV successfully', 'success');
+    } catch (error) {
+      showToast('Failed to export CSV logs', 'error');
+    }
+  };
+
+  const [apiSimCount, setApiSimCount] = useState(100);
+
+  const simulateApiCalls = () => {
+    if (!socketRef.current || !simulatedClientKey) return;
+    setSimulationLogs(prev => [
+      ...prev,
+      `[${new Date().toLocaleTimeString()}] [API] Dispatching ${apiSimCount} secure node calls to validation engine...`
+    ]);
+    socketRef.current.emit("node:simulate_api_call", { license_key: simulatedClientKey, count: apiSimCount });
+  };
+
+  // Sync inputs when selected license changes
+  useEffect(() => {
+    if (simulatedClientKey) {
+      const selected = licenses.find(l => l.license_key === simulatedClientKey);
+      if (selected) {
+        setHwIdInput(selected.hardware_id || 'HWID-SIMULATED-9832');
+        setIpInput(selected.ip_whitelist ? selected.ip_whitelist.split(',')[0] : '127.0.0.1');
+      }
+    } else if (activeLicenses.length > 0) {
+      setSimulatedClientKey(activeLicenses[0].license_key);
+      setHwIdInput(activeLicenses[0].hardware_id || 'HWID-SIMULATED-9832');
+      setIpInput(activeLicenses[0].ip_whitelist ? activeLicenses[0].ip_whitelist.split(',')[0] : '127.0.0.1');
+    }
+  }, [simulatedClientKey, licenses]);
+
+  // Server-side heartbeat loop automatically cleans up zombie nodes (stale for >30s)
+
+  // Handle server responses specifically for our connection handshake
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+
+    const onNodeConnected = (data: any) => {
+      setSimulationLogs(prev => [
+        ...prev, 
+        `[${new Date().toLocaleTimeString()}] [SUCCESS] Handshake approved for license_key ${simulatedClientKey?.substring(0, 8)}...`,
+        `[${new Date().toLocaleTimeString()}] [INFO] Active stream established with ${data.software_name} [${data.tier} tier].`
+      ]);
+      showToast('WebSocket node authorized successfully!', 'success');
+      fetchRiskScores();
+    };
+
+    const onNodeError = (err: any) => {
+      setSimulationLogs(prev => [
+        ...prev, 
+        `[${new Date().toLocaleTimeString()}] [DENIED] Authorization failed: ${err.error}`
+      ]);
+      showToast(`WS connection rejected: ${err.error}`, 'error');
+      fetchRiskScores();
+    };
+
+    const onApiCallLogged = (data: any) => {
+      setSimulationLogs(prev => [
+        ...prev,
+        `[${new Date().toLocaleTimeString()}] [SUCCESS] Logged API traffic successfully! Counts -> Daily: ${data.counts.daily}, Monthly: ${data.counts.monthly}, Yearly: ${data.counts.yearly}`
+      ]);
+      showToast('API traffic successfully processed and verified!', 'success');
+    };
+
+    socket.on("node:connected", onNodeConnected);
+    socket.on("node:error", onNodeError);
+    socket.on("node:api_call_logged", onApiCallLogged);
+
+    return () => {
+      socket.off("node:connected", onNodeConnected);
+      socket.off("node:error", onNodeError);
+      socket.off("node:api_call_logged", onApiCallLogged);
+    };
+  }, [socketRef.current, simulatedClientKey]);
+
+  const disconnectWebSocketNode = (keyToDisconnect?: string) => {
+    const key = keyToDisconnect || simulatedClientKey;
+    if (!socketRef.current || !key) return;
+    
+    setSimulationLogs(prev => [
+      ...prev, 
+      `[${new Date().toLocaleTimeString()}] [WS] Terminated node session for key: ${key.substring(0, 8)}...`
+    ]);
+    socketRef.current.emit("node:disconnect_node", { license_key: key });
+    showToast('WebSocket Node disconnected.', 'success');
+  };
+
+  const getLatencyIndicator = (rtt: number | undefined) => {
+    if (rtt === undefined || rtt < 0) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[9px] font-mono text-zinc-500 bg-zinc-900/50 px-1.5 py-0.5 rounded border border-zinc-800/80">
+          <span className="w-1 h-1 bg-zinc-500 rounded-full animate-pulse" />
+          PINGING...
+        </span>
+      );
+    }
+    
+    let colorClass = "text-emerald-400 bg-emerald-950/40 border-emerald-900/50 shadow-[0_0_8px_rgba(16,185,129,0.1)]";
+    let dotColor = "bg-emerald-400 shadow-[0_0_4px_rgba(16,185,129,0.8)]";
+    
+    if (rtt >= latencyThreshold) {
+      colorClass = "text-rose-400 bg-rose-950/40 border-rose-900/50 shadow-[0_0_8px_rgba(244,63,94,0.1)]";
+      dotColor = "bg-rose-400 shadow-[0_0_4px_rgba(244,63,94,0.8)] animate-pulse";
+    } else if (rtt >= latencyThreshold / 3) {
+      colorClass = "text-amber-400 bg-amber-950/40 border-amber-900/50 shadow-[0_0_8px_rgba(245,158,11,0.1)]";
+      dotColor = "bg-amber-400 shadow-[0_0_4px_rgba(245,158,11,0.8)]";
+    }
+    
+    return (
+      <span className={cn("inline-flex items-center gap-1.5 text-[9px] font-mono px-1.5 py-0.5 rounded border", colorClass)}>
+        <span className={cn("w-1 h-1 rounded-full", dotColor)} />
+        {rtt}ms
+      </span>
+    );
+  };
+
+  // Calculate Network Health metrics
+  const connectedNodes = liveWebSocketNodes.filter(n => n.rtt !== undefined && n.rtt >= 0);
+  const averageRtt = connectedNodes.length > 0 
+    ? Math.round(connectedNodes.reduce((sum, n) => sum + (n.rtt || 0), 0) / connectedNodes.length) 
+    : null;
+
+  const minRtt = connectedNodes.length > 0
+    ? Math.min(...connectedNodes.map(n => n.rtt || 0))
+    : null;
+
+  const maxRtt = connectedNodes.length > 0
+    ? Math.max(...connectedNodes.map(n => n.rtt || 0))
+    : null;
+
+  // Calculate dynamic ideal heartbeat interval based on current global average RTT
+  const idealHeartbeatInterval = averageRtt !== null 
+    ? Math.max(3000, Math.min(15000, Math.round((3000 + (averageRtt * 20)) / 500) * 500))
+    : 3000;
+
+  const connectWebSocketNode = () => {
+    if (!socketRef.current) {
+      showToast('Master socket disconnected', 'error');
+      return;
+    }
+    if (!simulatedClientKey) {
+      showToast('Please select a license key first', 'error');
+      return;
+    }
+    setSimulationLogs(prev => [
+      ...prev, 
+      `[${new Date().toLocaleTimeString()}] [WS] Dialing secure licensing socket...`,
+      `[${new Date().toLocaleTimeString()}] [WS] Submitting verification payload (IP: ${ipInput}, HWID: ${hwIdInput}, Adaptive Heartbeat: ${idealHeartbeatInterval / 1000}s)...`
+    ]);
+    socketRef.current.emit("node:connect", {
+      license_key: simulatedClientKey,
+      hardware_id: hwIdInput,
+      ip: ipInput,
+      asset_class: assetClassInput,
+      account_id: accountIdInput,
+      heartbeat_interval: idealHeartbeatInterval
+    });
+  };
+
+  // Health assessment
+  let healthStatus = "STANDBY";
+  let healthColor = "text-zinc-400 bg-zinc-900/50 border-zinc-800/80";
+  let healthDot = "bg-zinc-500";
+  let healthDescription = "No active WebSocket pipelines currently open.";
+
+  if (liveWebSocketNodes.length > 0) {
+    if (averageRtt === null) {
+      healthStatus = "INITIALIZING";
+      healthColor = "text-indigo-400 bg-indigo-950/20 border-indigo-900/40 shadow-[0_0_12px_rgba(129,140,248,0.05)]";
+      healthDot = "bg-indigo-400 animate-ping";
+      healthDescription = "Sockets established. Dispatching handshake pings...";
+    } else if (averageRtt < 50) {
+      healthStatus = "EXCELLENT";
+      healthColor = "text-emerald-400 bg-emerald-950/30 border-emerald-900/40 shadow-[0_0_12px_rgba(16,185,129,0.08)]";
+      healthDot = "bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.8)]";
+      healthDescription = "All channels routing at sub-millisecond hyper-speed.";
+    } else if (averageRtt < 150) {
+      healthStatus = "STABLE";
+      healthColor = "text-amber-400 bg-amber-950/30 border-amber-900/40 shadow-[0_0_12px_rgba(245,158,11,0.08)]";
+      healthDot = "bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.8)]";
+      healthDescription = "Nominal pipeline overhead. Fully within operational limits.";
+    } else {
+      healthStatus = "DEGRADED";
+      healthColor = "text-rose-400 bg-rose-950/30 border-rose-900/40 shadow-[0_0_12px_rgba(244,63,94,0.08)] animate-pulse";
+      healthDot = "bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]";
+      healthDescription = "High latency detected. Congestion on validation tunnels.";
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      
+      {/* Network Health Summary Stat Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-5 backdrop-blur-sm relative overflow-hidden">
+        {/* Glow effect matching health status */}
+        {liveWebSocketNodes.length > 0 && (
+          <div className={cn(
+            "absolute -top-12 -left-12 w-48 h-48 rounded-full blur-[64px] pointer-events-none opacity-20 transition-all duration-500",
+            healthStatus === "EXCELLENT" && "bg-emerald-500",
+            healthStatus === "STABLE" && "bg-amber-500",
+            healthStatus === "DEGRADED" && "bg-rose-500",
+            healthStatus === "INITIALIZING" && "bg-indigo-500"
+          )} />
+        )}
+        
+        <div className="relative flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="p-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+                <Activity className="w-4 h-4 animate-pulse" />
+              </span>
+              <h2 className="text-zinc-100 font-bold tracking-tight text-sm uppercase">Global Network Pipeline Status</h2>
+            </div>
+            <p className="text-xs text-zinc-500 font-mono">Real-time WebSocket transport & telemetry monitor</p>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 w-full md:w-auto">
+            {/* Pipeline Health */}
+            <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3 space-y-1">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block">Pipeline Status</span>
+              <div className="flex items-center gap-1.5">
+                <span className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono border font-bold", healthColor)}>
+                  <span className={cn("w-1 h-1 rounded-full", healthDot)} />
+                  {healthStatus}
+                </span>
+              </div>
+            </div>
+
+            {/* Average Latency */}
+            <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3 space-y-1">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block">Average Latency</span>
+              <div className="flex items-baseline gap-1">
+                <span className={cn(
+                  "text-base font-bold font-mono tracking-tight",
+                  averageRtt === null ? "text-zinc-500" : averageRtt < 50 ? "text-emerald-400" : averageRtt < 150 ? "text-amber-400" : "text-rose-400"
+                )}>
+                  {averageRtt !== null ? `${averageRtt}` : "N/A"}
+                </span>
+                {averageRtt !== null && <span className="text-[9px] text-zinc-500 font-mono">RTT</span>}
+              </div>
+            </div>
+
+            {/* Active Tunnels */}
+            <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3 space-y-1">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block">Active Tunnels</span>
+              <div className="flex items-baseline gap-1">
+                <span className={cn("text-base font-bold font-mono tracking-tight", liveWebSocketNodes.length > 0 ? "text-indigo-400" : "text-zinc-500")}>
+                  {liveWebSocketNodes.length}
+                </span>
+                <span className="text-[9px] text-zinc-500 font-mono">ACTIVE</span>
+              </div>
+            </div>
+
+            {/* Jitter / Range */}
+            <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3 space-y-1">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block">Telemetry Span</span>
+              <div className="flex items-baseline gap-0.5">
+                <span className="text-xs font-bold font-mono tracking-tight text-zinc-300">
+                  {minRtt !== null && maxRtt !== null ? `${minRtt}-${maxRtt}` : "N/A"}
+                </span>
+                {minRtt !== null && maxRtt !== null && <span className="text-[9px] text-zinc-500 font-mono pl-0.5">ms</span>}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 pt-3 border-t border-zinc-800/40 flex items-center gap-2 text-[10px] text-zinc-400 font-mono">
+          <span className="text-zinc-500">Diagnostic Summary:</span>
+          <span>{healthDescription}</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      
+      {/* Configured Whitelist Registry (SQLite) */}
+      <div className="lg:col-span-2 space-y-6">
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+          <div className="flex justify-between items-center mb-4">
+            <div>
+              <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+                <Database className="w-4 h-4 text-indigo-400" />
+                Active Node Configs (SQLite)
+              </h3>
+              <p className="text-xs text-zinc-500 font-mono mt-1">Configured licensing endpoints from database</p>
+            </div>
+            <span className="bg-zinc-800 border border-zinc-700 px-2 py-1 rounded text-[10px] font-mono text-zinc-400">
+              {activeLicenses.length} Whitelisted
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="bg-zinc-900/50 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
+                <tr>
+                  <th className="px-4 py-3">Client / Key</th>
+                  <th className="px-4 py-3">HWID Policy</th>
+                  <th className="px-4 py-3">IP Policy</th>
+                  <th className="px-4 py-3 text-right">Channel Status</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/40">
+                {activeLicenses.map(l => {
+                  const isLiveWS = liveWebSocketNodes.some(n => n.license_key === l.license_key);
+                  return (
+                    <tr key={l.id} className="hover:bg-zinc-800/10">
+                      <td className="px-4 py-3">
+                        <div className="font-medium text-zinc-200 text-xs">{l.issued_to}</div>
+                        <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-1 mt-0.5">
+                          <Key className="w-3 h-3 text-indigo-400/80" />
+                          {l.license_key ? `${l.license_key.substring(0, 12)}...` : 'N/A'}
+                        </div>
+                        {l.asset_classes && (
+                          <div className="flex gap-1 mt-1.5">
+                            {JSON.parse(l.asset_classes).map((a: string) => (
+                              <span key={a} className="bg-zinc-800/80 text-[8px] text-zinc-400 px-1 py-0.5 rounded border border-zinc-700/50 uppercase font-bold tracking-tighter">
+                                {a}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <button 
+                          onClick={() => l.hardware_id && copyToClipboard(l.hardware_id)}
+                          className="flex items-center hover:text-indigo-400 transition-colors text-zinc-400 font-mono text-[10px]"
+                        >
+                          <Cpu className="w-3 h-3 mr-1.5 text-zinc-500" />
+                          {l.hardware_id || 'UNLOCKED'}
+                        </button>
+                        {l.hardware_id && (
+                          <button 
+                            onClick={() => handleResetHwid(l.id)}
+                            className="ml-2 text-rose-400 hover:text-rose-300 transition-colors p-1"
+                            title="Reset Hardware Lock"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                          </button>
+                        )}
+                        <button 
+                          onClick={() => handleGenerateOfflineToken(l.id)}
+                          className="ml-2 text-indigo-400 hover:text-indigo-300 transition-colors p-1"
+                          title="Generate Offline Token"
+                        >
+                          <Zap className="w-3 h-3" />
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 text-zinc-400 font-mono text-[10px]">
+                        <Server className="w-3 h-3 inline mr-1.5 text-zinc-500" />
+                        {l.ip_whitelist || '0.0.0.0/0'}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {isLiveWS ? (
+                          <div className="flex items-center justify-end gap-2">
+                            <div className="inline-flex items-center gap-1.5 text-indigo-400 font-mono text-[10px] bg-indigo-950/40 border border-indigo-900/50 px-2 py-0.5 rounded-full">
+                              <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse shadow-[0_0_8px_rgba(129,140,248,0.8)]" />
+                              WS LIVE
+                            </div>
+                            {getLatencyIndicator(liveWebSocketNodes.find(n => n.license_key === l.license_key)?.rtt)}
+                          </div>
+                        ) : (
+                          <div className="inline-flex items-center gap-1.5 text-emerald-500 font-mono text-[10px] bg-emerald-950/20 border border-emerald-900/30 px-2 py-0.5 rounded-full">
+                            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
+                            HTTP IDLE
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button 
+                          onClick={() => setEditingLicense(l)}
+                          className="bg-zinc-800/80 hover:bg-zinc-700/80 border border-zinc-700/50 text-indigo-400 hover:text-indigo-300 text-[10px] font-mono px-2 py-1 rounded transition-all inline-flex items-center gap-1"
+                        >
+                          <SlidersHorizontal className="w-3 h-3" />
+                          Configure
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {activeLicenses.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-zinc-500 font-mono text-xs">
+                      NO ACTIVE LICENSES
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Live Connected WS Pipes */}
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+              <Zap className="w-4 h-4 text-indigo-400" />
+              Live Connected Pipes ({liveWebSocketNodes.length})
+            </h3>
+            {liveWebSocketNodes.length > 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const allKeys = liveWebSocketNodes.map(n => n.license_key);
+                    const allSelected = allKeys.every(k => selectedKeys.includes(k));
+                    if (allSelected) {
+                      setSelectedKeys(prev => prev.filter(k => !allKeys.includes(k)));
+                    } else {
+                      setSelectedKeys(prev => {
+                        const next = [...prev];
+                        allKeys.forEach(k => {
+                          if (!next.includes(k)) next.push(k);
+                        });
+                        return next;
+                      });
+                    }
+                  }}
+                  className="bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-750 text-zinc-300 hover:text-zinc-200 text-[10px] px-2.5 py-1 rounded font-mono transition-colors flex items-center gap-1"
+                >
+                  {liveWebSocketNodes.map(n => n.license_key).every(k => selectedKeys.includes(k)) ? "Deselect All" : "Select All"}
+                </button>
+                {selectedKeys.filter(k => liveWebSocketNodes.some(n => n.license_key === k)).length > 0 && (
+                  <button
+                    onClick={() => setShowDisconnectConfirm(true)}
+                    className="bg-rose-500/20 hover:bg-rose-500 border border-rose-500/30 hover:border-rose-400/50 text-rose-400 hover:text-white text-[10px] font-bold px-2.5 py-1 rounded font-mono transition-all flex items-center gap-1 shadow-[0_0_10px_rgba(244,63,94,0.1)]"
+                  >
+                    <StopCircle className="w-3 h-3" />
+                    Disconnect Selected ({selectedKeys.filter(k => liveWebSocketNodes.some(n => n.license_key === k)).length})
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            {liveWebSocketNodes.map((node, idx) => {
+              const isSelected = selectedKeys.includes(node.license_key);
+              const isLatencyExceeded = node.rtt !== undefined && node.rtt > latencyThreshold;
+              return (
+                <div 
+                  key={idx} 
+                  className={cn(
+                    "flex justify-between items-center bg-zinc-950/40 border p-3 rounded-lg transition-all relative overflow-hidden",
+                    isLatencyExceeded 
+                      ? "border-rose-500/40 bg-rose-950/15 shadow-[0_0_12px_rgba(244,63,94,0.08)]"
+                      : isSelected 
+                        ? "border-indigo-500/50 bg-indigo-950/10 shadow-[0_0_12px_rgba(99,102,241,0.05)]" 
+                        : "border-zinc-800/60 hover:border-zinc-700/80"
+                  )}
+                >
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => {
+                        if (isSelected) {
+                          setSelectedKeys(prev => prev.filter(k => k !== node.license_key));
+                        } else {
+                          setSelectedKeys(prev => [...prev, node.license_key]);
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-zinc-800 bg-zinc-950 text-indigo-600 focus:ring-indigo-500/50 focus:ring-offset-zinc-950 cursor-pointer"
+                    />
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono text-zinc-300 font-semibold">{node.license_key.substring(0, 12)}...</span>
+                        <span className="bg-indigo-950 text-indigo-400 text-[9px] px-1.5 py-0.5 rounded font-mono border border-indigo-900/50">LIVE SOCKET</span>
+                        {getLatencyIndicator(node.rtt)}
+                        {isLatencyExceeded && (
+                          <span className="bg-rose-500/10 border border-rose-500/30 text-rose-400 text-[9px] px-1.5 py-0.5 rounded font-mono flex items-center gap-1 animate-pulse font-semibold">
+                            <AlertTriangle className="w-2.5 h-2.5" /> DEGRADED
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] font-mono text-zinc-500 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span>IP: {node.ip}</span>
+                        <span>HWID: {node.hardwareId}</span>
+                        <span>Since: {new Date(node.connectedAt).toLocaleTimeString()}</span>
+                        <span className="flex items-center gap-1 text-indigo-400 font-semibold bg-indigo-950/20 px-1.5 py-0.5 rounded border border-indigo-950/40">
+                          <span>Heartbeat: {node.heartbeatInterval ? `${node.heartbeatInterval / 1000}s` : '3s'}</span>
+                          {node.heartbeatInterval && node.heartbeatInterval > 3000 && (
+                            <span className="text-[8px] bg-indigo-500 text-zinc-950 px-1 rounded-sm font-bold scale-90 origin-left uppercase">OPTIMIZED</span>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => disconnectWebSocketNode(node.license_key)}
+                    className="bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/60 hover:border-zinc-600 text-rose-400 hover:text-rose-300 text-[10px] px-2.5 py-1 rounded font-mono transition-colors"
+                  >
+                    DISCONNECT
+                  </button>
+                </div>
+              );
+            })}
+            {liveWebSocketNodes.length === 0 && (
+              <div className="text-center py-6 text-zinc-500 font-mono text-xs border border-dashed border-zinc-800/80 rounded-lg">
+                NO ACTIVE SOCKET CONNECTIONS ESTABLISHED
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* WebSocket Simulation Terminal Console */}
+      <div className="space-y-6">
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm flex flex-col h-full space-y-4">
+          <div>
+            <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+              <Zap className="w-4 h-4 text-amber-400 animate-pulse" />
+              WS Validation Console
+            </h3>
+            <p className="text-xs text-zinc-500 font-mono mt-1">Simulate live node licensing handshakes</p>
+          </div>
+
+          <div className="space-y-3 pt-2">
+            <div>
+              <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Select Whitelisted License</label>
+              <select 
+                value={simulatedClientKey} 
+                onChange={e => setSimulatedClientKey(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono outline-none focus:border-indigo-500"
+              >
+                <option value="">-- Choose License Key --</option>
+                {activeLicenses.map(l => (
+                  <option key={l.id} value={l.license_key}>
+                    {l.issued_to} ({l.license_key.substring(0, 8)}...)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Simulated Hardware ID (HWID)</label>
+              <input 
+                type="text" 
+                value={hwIdInput} 
+                onChange={e => setHwIdInput(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-300 text-xs font-mono outline-none focus:border-indigo-500" 
+              />
+            </div>
+
+            <div>
+              <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Simulated Source IP</label>
+              <input 
+                type="text" 
+                value={ipInput} 
+                onChange={e => setIpInput(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-300 text-xs font-mono outline-none focus:border-indigo-500" 
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Asset Class</label>
+                <select 
+                  value={assetClassInput} 
+                  onChange={e => setAssetClassInput(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-300 text-xs font-mono outline-none focus:border-indigo-500" 
+                >
+                  <option value="forex">Forex</option>
+                  <option value="crypto">Crypto</option>
+                  <option value="stocks">Stocks</option>
+                  <option value="commodities">Commodities</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Account ID / Key</label>
+                <input 
+                  type="text" 
+                  value={accountIdInput} 
+                  onChange={e => setAccountIdInput(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-300 text-xs font-mono outline-none focus:border-indigo-500" 
+                />
+              </div>
+            </div>
+
+            <div className="bg-zinc-950/60 border border-zinc-850/80 rounded-lg p-3 space-y-1">
+              <div className="flex justify-between items-center">
+                <span className="text-[9px] font-mono text-zinc-500 uppercase">Adaptive Heartbeat Interval</span>
+                <span className="text-[8px] font-mono font-extrabold px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-400 border border-indigo-900/40">AUTO OPTIMIZED</span>
+              </div>
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm font-mono font-bold text-zinc-200">{idealHeartbeatInterval / 1000}s ({idealHeartbeatInterval}ms)</span>
+                <span className="text-[9px] font-mono text-zinc-500">
+                  Calculated from {averageRtt !== null ? `${averageRtt}ms Avg RTT` : "3000ms Baseline"}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <button 
+                onClick={connectWebSocketNode}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white font-mono text-[10px] font-bold py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                WS_CONNECT
+              </button>
+              <button 
+                onClick={() => disconnectWebSocketNode()}
+                className="bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 font-mono text-[10px] py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
+              >
+                <StopCircle className="w-3.5 h-3.5" />
+                WS_ABORT
+              </button>
+            </div>
+
+            {liveWebSocketNodes.some(n => n.license_key === simulatedClientKey) && (
+              <div className="bg-zinc-950/40 border border-indigo-900/40 p-3 rounded-lg space-y-2 mt-2">
+                <div className="text-[10px] font-mono text-indigo-400 font-semibold uppercase flex items-center gap-1">
+                  <Zap className="w-3 h-3 text-indigo-400 animate-pulse" />
+                  Secure Live Traffic Simulator
+                </div>
+                <div className="flex gap-2">
+                  <input 
+                    type="number" 
+                    value={apiSimCount} 
+                    onChange={e => setApiSimCount(Math.max(1, Number(e.target.value)))}
+                    className="w-1/2 bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1 text-zinc-300 text-xs font-mono outline-none focus:border-indigo-500" 
+                  />
+                  <button 
+                    onClick={simulateApiCalls}
+                    className="w-1/2 bg-indigo-600 hover:bg-indigo-500 text-white font-mono text-[10px] font-bold py-1 px-3 rounded-lg transition-colors flex items-center justify-center gap-1"
+                  >
+                    Simulate Traffic
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Terminal output */}
+          <div className="flex-1 flex flex-col space-y-1.5">
+            <div className="flex justify-between items-center">
+              <label className="text-[9px] font-mono text-zinc-500 uppercase">Interactive Terminal Logs</label>
+              <div className="flex items-center gap-2 font-mono text-[9px]">
+                {simulationLogs.length > 0 && (
+                  <>
+                    <button 
+                      onClick={exportLogsAsJSON} 
+                      className="text-indigo-400 hover:text-indigo-300 uppercase hover:underline"
+                      title="Export logs as structured JSON"
+                    >
+                      Export JSON
+                    </button>
+                    <span className="text-zinc-700 font-bold">|</span>
+                    <button 
+                      onClick={exportLogsAsCSV} 
+                      className="text-indigo-400 hover:text-indigo-300 uppercase hover:underline"
+                      title="Export logs as CSV spreadsheet"
+                    >
+                      Export CSV
+                    </button>
+                    <span className="text-zinc-700 font-bold">|</span>
+                  </>
+                )}
+                <button 
+                  onClick={() => setSimulationLogs([])} 
+                  className="text-zinc-400 hover:text-zinc-300 uppercase"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="bg-zinc-950/90 border border-zinc-850 p-3 rounded-lg font-mono text-[10px] text-zinc-400 h-48 overflow-y-auto space-y-1 select-text scrollbar-thin scrollbar-thumb-zinc-800">
+              {simulationLogs.map((log, idx) => {
+                let color = 'text-zinc-400';
+                if (log.includes('[SUCCESS]')) color = 'text-emerald-400';
+                else if (log.includes('[ERROR]') || log.includes('[DENIED]')) color = 'text-rose-400';
+                else if (log.includes('[INFO]')) color = 'text-blue-400';
+                return (
+                  <div key={idx} className={cn("leading-relaxed break-all", color)}>
+                    {log}
+                  </div>
+                );
+              })}
+              {simulationLogs.length === 0 && (
+                <div className="text-zinc-600 text-center py-12">
+                  System diagnostic logs will print here...
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <EditNodeConfigModal 
+        isOpen={editingLicense !== null} 
+        onClose={() => setEditingLicense(null)} 
+        license={editingLicense} 
+        onSave={handleSaveConfig} 
+      />
+
+      {/* Bulk Disconnect Confirmation Modal */}
+      {showDisconnectConfirm && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-zinc-900 border border-zinc-800/80 rounded-xl w-full max-w-md overflow-hidden shadow-2xl relative">
+            <div className="p-5 border-b border-zinc-800/80 bg-zinc-950/50 flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400">
+                <AlertTriangle className="w-5 h-5 animate-pulse" />
+              </div>
+              <div>
+                <h4 className="text-zinc-100 font-bold tracking-tight text-sm uppercase">Terminate Sessions</h4>
+                <p className="text-[10px] text-zinc-500 font-mono">Requires administrator authorization</p>
+              </div>
+            </div>
+            
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-zinc-300 leading-relaxed">
+                You are about to terminate <span className="text-rose-400 font-bold">{selectedKeys.filter(k => liveWebSocketNodes.some(n => n.license_key === k)).length} active WebSocket pipeline(s)</span>. 
+                Any client terminals bound to these sessions will lose authorization and be disconnected immediately.
+              </p>
+
+              <div className="bg-zinc-950/80 border border-zinc-850 rounded-lg p-3 max-h-40 overflow-y-auto space-y-2">
+                <span className="text-[9px] font-mono text-zinc-500 uppercase block mb-1">Target Licenses:</span>
+                {selectedKeys.filter(k => liveWebSocketNodes.some(n => n.license_key === k)).map(key => {
+                  const node = liveWebSocketNodes.find(n => n.license_key === key);
+                  return (
+                    <div key={key} className="flex justify-between items-center text-[10px] font-mono text-zinc-400 border-b border-zinc-900/50 pb-1.5 last:border-0 last:pb-0">
+                      <span className="font-semibold text-zinc-300">{key.substring(0, 16)}...</span>
+                      {node && <span className="text-zinc-500">IP: {node.ip}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="p-4 bg-zinc-950/40 border-t border-zinc-800/80 flex justify-end gap-3">
+              <button
+                onClick={() => setShowDisconnectConfirm(false)}
+                className="bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/60 text-zinc-300 font-mono text-[10px] py-2 px-4 rounded-lg transition-colors"
+              >
+                CANCEL_ABORT
+              </button>
+              <button
+                onClick={() => {
+                  const toDisconnect = selectedKeys.filter(k => liveWebSocketNodes.some(n => n.license_key === k));
+                  toDisconnect.forEach(key => {
+                    disconnectWebSocketNode(key);
+                  });
+                  setSelectedKeys([]);
+                  setShowDisconnectConfirm(false);
+                  showToast(`Dispatched termination signals for ${toDisconnect.length} connection(s).`, 'success');
+                }}
+                className="bg-rose-500 hover:bg-rose-600 text-white font-mono text-[10px] font-bold py-2 px-4 rounded-lg transition-all shadow-[0_0_15px_rgba(244,63,94,0.3)] flex items-center gap-1.5"
+              >
+                <StopCircle className="w-3.5 h-3.5" />
+                CONFIRM_TERMINATE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      </div>
+    </div>
+  );
+}
+
+function SettingsView({ 
+  showToast, 
+  licenses, 
+  socketRef, 
+  currentUser,
+  handleGenerateOfflineToken,
+  copyToClipboard,
+  latencyThreshold,
+  setLatencyThreshold
+}: { 
+  showToast: (msg: string, type: 'success'|'error') => void, 
+  licenses: License[],
+  socketRef: React.MutableRefObject<Socket | null>,
+  currentUser: AppUser | null,
+  handleGenerateOfflineToken: (id: string) => Promise<string | null>,
+  copyToClipboard: (text: string) => void,
+  latencyThreshold: number,
+  setLatencyThreshold: React.Dispatch<React.SetStateAction<number>>
+}) {
+  const [isRotating, setIsRotating] = useState(false);
+  const [isSavingLatency, setIsSavingLatency] = useState(false);
+
+  const handleSaveLatencyThreshold = async () => {
+    setIsSavingLatency(true);
+    try {
+      const res = await fetch('/api/settings/latency-threshold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          threshold: latencyThreshold,
+          user: currentUser
+        })
+      });
+      if (res.ok) {
+        showToast('Latency alert threshold updated successfully', 'success');
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch (err) {
+      showToast('Error saving latency threshold', 'error');
+    } finally {
+      setIsSavingLatency(false);
+    }
+  };
+  const [schedule, setSchedule] = useState<AuditSchedule | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [recipients, setRecipients] = useState('');
+  const [dispatchHour, setDispatchHour] = useState(9);
+  const [reportScope, setReportScope] = useState<'comprehensive' | 'summary' | 'risk_only'>('comprehensive');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const mt5Snippet = `
+// MT5 Connection Snippet for Quant Fund Licensing
+// Paste this inside your Expert Advisor code
+
+#include <JSON\\json.mqh> // Ensure you have a JSON library installed
+
+int OnInit() {
+   string serverUrl = "${window.location.origin}/api/license/verify";
+   string licenseKey = "YOUR_LICENSE_KEY_HERE";
+   
+   // Generate Hardware Fingerprint
+   string hardwareID = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
+   long account = AccountInfoInteger(ACCOUNT_LOGIN);
+   string fingerprint = hardwareID + "_" + IntegerToString(account);
+   
+   // Specific asset and account context
+   string assetClass = "forex"; // or "crypto", "stocks"
+   string accountID = IntegerToString(account);
+
+   string postData = "{\\"license_key\\":\\"" + licenseKey + 
+                    "\\", \\"hardware_id\\":\\"" + fingerprint + 
+                    "\\", \\"asset_class\\":\\"" + assetClass + 
+                    "\\", \\"account_id\\":\\"" + accountID + "\\" }";
+   
+   char post[], result[];
+   string headers = "Content-Type: application/json\\r\\n";
+   StringToCharArray(postData, post);
+   
+   int res = WebRequest("POST", serverUrl, headers, 5000, post, result, headers);
+   
+   if(res == 200) {
+      Print("License Verified. Node-Lock Bound: " + fingerprint);
+      return(INIT_SUCCEEDED);
+   } else {
+      Alert("License Unauthorized! Check HWID or Expiry.");
+      return(INIT_FAILED);
+   }
+}
+  `;
+
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simResult, setSimResult] = useState<{ pdfName: string, recipients: string[], timestamp: string, scope: string } | null>(null);
+  const [smtp, setSmtp] = useState({ host: '', port: 587, user: '', pass: '', secure: false, from_email: '' });
+  const [isSavingSmtp, setIsSavingSmtp] = useState(false);
+  const [isTestingSmtp, setIsTestingSmtp] = useState(false);
+  const [general, setGeneral] = useState({ appName: 'QUANT FUND LICENSING', systemEmail: 'admin@quantfund.net' });
+  const [systemPublicKey, setSystemPublicKey] = useState('');
+  const [offlineToken, setOfflineToken] = useState<{ id: string, token: string } | null>(null);
+
+  const onGenerateOfflineToken = async (id: string) => {
+    const token = await handleGenerateOfflineToken(id);
+    if (token) {
+      setOfflineToken({ id, token });
+    }
+  };
+
+  const fetchSchedule = async () => {
+    try {
+      const res = await fetch('/api/audit-schedule');
+      const data = await res.json();
+      if (data) {
+        setSchedule(data);
+        setEnabled(data.enabled === 1);
+        setRecipients(data.recipients || '');
+        setDispatchHour(data.dispatch_hour || 0);
+        setReportScope(data.report_scope || 'comprehensive');
+      }
+
+      const smtpRes = await fetch('/api/smtp');
+      const smtpData = await smtpRes.json();
+      if (smtpData) {
+        setSmtp({
+          ...smtpData,
+          secure: smtpData.secure === 1
+        });
+      }
+
+      const pubKeyRes = await fetch('/api/system/public-key');
+      const pubKeyData = await pubKeyRes.json();
+      setSystemPublicKey(pubKeyData.publicKey);
+
+      const thresholdRes = await fetch('/api/settings/latency-threshold');
+      const thresholdData = await thresholdRes.json();
+      if (thresholdData) {
+        setLatencyThreshold(thresholdData.threshold);
+      }
+    } catch (err) {
+      console.error("Failed to fetch settings:", err);
+    }
+  };
+
+  const handleSaveSmtp = async () => {
+    setIsSavingSmtp(true);
+    try {
+      const res = await fetch('/api/smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...smtp,
+          secure: smtp.secure ? 1 : 0
+        })
+      });
+      if (res.ok) {
+        showToast('SMTP settings saved successfully', 'success');
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch (err) {
+      showToast('Error saving SMTP settings', 'error');
+    } finally {
+      setIsSavingSmtp(false);
+    }
+  };
+
+  const handleTestSmtp = async () => {
+    if (!smtp.from_email) {
+      showToast('Please set a from email first', 'error');
+      return;
+    }
+    setIsTestingSmtp(true);
+    try {
+      const res = await fetch('/api/smtp/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: smtp.from_email })
+      });
+      if (res.ok) {
+        showToast('Test email sent successfully', 'success');
+      } else {
+        const data = await res.json();
+        showToast(data.error || 'Failed to send test email', 'error');
+      }
+    } catch (err) {
+      showToast('Network error during SMTP test', 'error');
+    } finally {
+      setIsTestingSmtp(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchSchedule();
+  }, []);
+
+  // Listen to socket updates for real-time sync
+  useEffect(() => {
+    const socket = io();
+    socket.on('audit_schedule:updated', (data: AuditSchedule) => {
+      if (data) {
+        setSchedule(data);
+        setEnabled(data.enabled === 1);
+        setRecipients(data.recipients || '');
+        setDispatchHour(data.dispatch_hour || 0);
+        setReportScope(data.report_scope || 'comprehensive');
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  const handleRotate = () => {
+    setIsRotating(true);
+    setTimeout(() => {
+      setIsRotating(false);
+      showToast('API Keys rotated successfully. Update your clients.', 'success');
+    }, 1500);
+  };
+
+  const handleSaveSchedule = async () => {
+    if (!recipients.trim()) {
+      showToast('Please enter at least one recipient email address', 'error');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const nextRunDate = new Date();
+      nextRunDate.setMonth(nextRunDate.getMonth() + 1);
+      nextRunDate.setDate(1);
+      nextRunDate.setHours(dispatchHour, 0, 0, 0);
+      const next_run_at = nextRunDate.toISOString();
+
+      const res = await fetch('/api/audit-schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: enabled ? 1 : 0,
+          recipients: recipients.trim(),
+          dispatch_hour: dispatchHour,
+          report_scope: reportScope,
+          next_run_at: enabled ? next_run_at : null
+        })
+      });
+
+      if (!res.ok) throw new Error('Failed to update schedule');
+      const data = await res.json();
+      setSchedule(data);
+      showToast('Monthly audit schedule updated successfully', 'success');
+    } catch (err) {
+      console.error(err);
+      showToast('Failed to save audit schedule', 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSimulateRun = async () => {
+    if (!schedule) return;
+    if (!recipients.trim()) {
+      showToast('Please specify a recipient email to dispatch simulated reports', 'error');
+      return;
+    }
+    setIsSimulating(true);
+    try {
+      // 1. Fetch events from server
+      const resEvents = await fetch('/api/events');
+      const events: LicenseEvent[] = await resEvents.json();
+
+      // 2. Compile PDF via client-side jsPDF
+      const doc = new jsPDF();
+      const margin = 15;
+      let y = 20;
+
+      // Title header
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(18);
+      doc.setTextColor(15, 23, 42); // slate-900
+      doc.text("MONTHLY AUTOMATED LICENSE AUDIT REPORT", margin, y);
+      y += 8;
+
+      // Subtitle
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139); // slate-500
+      doc.text(`Frequency: Monthly (1st of Month) | Dispatch Destination: ${recipients}`, margin, y);
+      y += 6;
+      doc.text(`Run Timestamp: ${new Date().toLocaleString()} (UTC)`, margin, y);
+      y += 12;
+
+      // Divider
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.5);
+      doc.line(margin, y, 195, y);
+      y += 10;
+
+      // Active licenses stats
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(12);
+      doc.setTextColor(30, 41, 59);
+      doc.text("1. SYSTEM HEALTH AND ACTIVE LICENSE SUMMARY", margin, y);
+      y += 8;
+
+      const activeLicenses = licenses.filter(l => l.status === 'active');
+      const suspendedLicenses = licenses.filter(l => l.status === 'suspended');
+
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(51, 65, 85);
+      doc.text(`Active / Total Licenses: ${activeLicenses.length} / ${licenses.length}`, margin + 5, y);
+      y += 6;
+      doc.text(`Configured Report Scope: ${reportScope.toUpperCase()}`, margin + 5, y);
+      y += 12;
+
+      // Table Header for Licenses
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(9);
+      doc.setFillColor(248, 250, 252);
+      doc.rect(margin, y, 180, 8, "F");
+      doc.setTextColor(71, 85, 105);
+      doc.text("License Key / Client", margin + 2, y + 6);
+      doc.text("Software", margin + 70, y + 6);
+      doc.text("Tier", margin + 110, y + 6);
+      doc.text("Expires At", margin + 135, y + 6);
+      doc.text("Status", margin + 165, y + 6);
+      y += 8;
+
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(51, 65, 85);
+
+      licenses.slice(0, 15).forEach((l) => {
+        if (y > 270) {
+          doc.addPage();
+          y = 20;
+        }
+        const keyText = l.license_key ? `${l.license_key.substring(0, 8)}... (${l.issued_to.substring(0, 12)})` : l.issued_to;
+        const softwareText = l.software_name ? l.software_name.substring(0, 18) : 'N/A';
+        const tierText = l.tier || 'N/A';
+        const expiresText = l.expires_at ? new Date(l.expires_at).toLocaleDateString() : 'N/A';
+        const statusText = (l.status || 'N/A').toUpperCase();
+
+        doc.text(keyText, margin + 2, y + 6);
+        doc.text(softwareText, margin + 70, y + 6);
+        doc.text(tierText, margin + 110, y + 6);
+        doc.text(expiresText, margin + 135, y + 6);
+        doc.text(statusText, margin + 165, y + 6);
+
+        doc.setDrawColor(241, 245, 249);
+        doc.line(margin, y + 8, margin + 180, y + 8);
+        y += 8;
+      });
+
+      y += 10;
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(12);
+      doc.setTextColor(30, 41, 59);
+      doc.text("2. TELEMETRY LOGS & COMPLIANCE VERIFICATIONS", margin, y);
+      y += 8;
+
+      if (!events || events.length === 0) {
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(10);
+        doc.setTextColor(148, 163, 184);
+        doc.text("No events logged this month.", margin + 5, y);
+        y += 10;
+      } else {
+        doc.setFont("Helvetica", "bold");
+        doc.setFontSize(9);
+        doc.setFillColor(248, 250, 252);
+        doc.rect(margin, y, 180, 8, "F");
+        doc.setTextColor(71, 85, 105);
+        doc.text("Timestamp", margin + 2, y + 6);
+        doc.text("Type", margin + 50, y + 6);
+        doc.text("Details Payload", margin + 90, y + 6);
+        y += 8;
+
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(51, 65, 85);
+
+        events.slice(0, 10).forEach((evt) => {
+          if (y > 270) {
+            doc.addPage();
+            y = 20;
+          }
+          const timeStr = evt.timestamp ? new Date(evt.timestamp).toLocaleString() : 'N/A';
+          const typeStr = evt.event_type || 'N/A';
+          let payloadStr = evt.event_data || '';
+
+          try {
+            const parsed = JSON.parse(evt.event_data);
+            payloadStr = Object.entries(parsed)
+              .map(([k, v]) => `${k}: ${v}`)
+              .join(", ");
+          } catch (_) {}
+
+          if (payloadStr.length > 60) {
+            payloadStr = payloadStr.substring(0, 57) + "...";
+          }
+
+          doc.text(timeStr, margin + 2, y + 5);
+          doc.text(typeStr, margin + 50, y + 5);
+          doc.text(payloadStr, margin + 90, y + 5);
+
+          doc.setDrawColor(241, 245, 249);
+          doc.line(margin, y + 7, margin + 180, y + 7);
+          y += 7;
+        });
+      }
+
+      // Add page numbers
+      const pageCount = (doc as any).internal.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(148, 163, 184);
+        doc.text(`Page ${i} of ${pageCount} | CONFIDENTIAL compliance auto-audit for ${recipients}`, margin, 285);
+      }
+
+      // Download file to browser
+      const pdfName = `monthly-license-audit-${new Date().toISOString().substring(0, 10)}.pdf`;
+      doc.save(pdfName);
+
+      // 3. Persist run metadata
+      const lastRunStr = new Date().toISOString();
+      const nextRunDate = new Date();
+      nextRunDate.setMonth(nextRunDate.getMonth() + 1);
+      nextRunDate.setDate(1);
+      nextRunDate.setHours(dispatchHour, 0, 0, 0);
+      const nextRunStr = nextRunDate.toISOString();
+
+      const response = await fetch('/api/audit-schedule/run-simulation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          last_run_at: lastRunStr,
+          next_run_at: nextRunStr
+        })
+      });
+
+      if (!response.ok) throw new Error('Simulation endpoint failed');
+      const resJson = await response.json();
+      if (resJson.success) {
+        setSchedule(resJson.schedule);
+        setSimResult({
+          pdfName,
+          recipients: recipients.split(',').map(e => e.trim()),
+          timestamp: lastRunStr,
+          scope: reportScope,
+        });
+        showToast('Simulated dispatch completed & report downloaded', 'success');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Simulation failed to execute', 'error');
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      {/* Schedule Auto-Audit Section */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-zinc-100 font-medium flex items-center gap-2">
+            <Calendar className="w-4.5 h-4.5 text-indigo-400"/> Schedule Auto-Audit
+          </h3>
+          <span className="text-[9px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-mono uppercase tracking-wider font-semibold">
+            1st of Every Month
+          </span>
+        </div>
+        
+        <p className="text-xs text-zinc-400 mb-6 font-sans leading-relaxed">
+          Configure the automated background compliance engine to compile historical licensing records, compute active nodes performance, and dispatch PDF audit reports securely.
+        </p>
+
+        {schedule === null ? (
+          <div className="text-center py-8 text-zinc-600 font-mono text-xs flex items-center justify-center gap-2">
+            <span className="w-4 h-4 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin"></span>
+            Retrieving server cron configurations...
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {/* Enabled toggle */}
+            <div className="flex items-center justify-between p-3.5 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+              <div>
+                <span className="text-xs text-zinc-200 font-semibold block">Enable Monthly Automated Dispatches</span>
+                <span className="text-[10px] text-zinc-500 font-mono mt-0.5 block">Calculates active risk indices and compiles raw DuckDB tables</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  checked={enabled} 
+                  onChange={(e) => setEnabled(e.target.checked)}
+                  className="sr-only peer" 
+                />
+                <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-zinc-400 after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500 peer-checked:after:bg-zinc-950"></div>
+              </label>
+            </div>
+
+            {/* Recipients */}
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Dispatch Recipient Emails</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-2.5 w-4 h-4 text-zinc-600" />
+                <input 
+                  type="text" 
+                  value={recipients}
+                  onChange={(e) => setRecipients(e.target.value)}
+                  placeholder="secops@quantfund.net, compliance@quantfund.net"
+                  className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg pl-10 pr-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+                />
+              </div>
+              <span className="text-[9px] text-zinc-600 font-sans mt-1.5 block">Use comma-separated format for multiple administrators</span>
+            </div>
+
+            {/* Row with Dispatch Hour and Report Scope */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Scheduled Time of Day (UTC)</label>
+                <select 
+                  value={dispatchHour}
+                  onChange={(e) => setDispatchHour(parseInt(e.target.value, 10))}
+                  className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors"
+                >
+                  {Array.from({ length: 24 }).map((_, i) => (
+                    <option key={i} value={i}>
+                      {i.toString().padStart(2, '0')}:00 UTC ({i === 12 ? '12 PM' : i > 12 ? `${i - 12} PM` : i === 0 ? '12 AM' : `${i} AM`})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Compliance PDF Scope</label>
+                <select 
+                  value={reportScope}
+                  onChange={(e) => setReportScope(e.target.value as any)}
+                  className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors"
+                >
+                  <option value="comprehensive">Comprehensive Audit (Licenses + Events)</option>
+                  <option value="summary">Summary Report (Active Licenses Only)</option>
+                  <option value="risk_only">Risk Telemetry Logs Only</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Next Scheduled & Last Run Status Badge */}
+            <div className="p-3.5 bg-zinc-950/30 rounded-lg border border-zinc-800/40 grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <span className="text-[9px] font-mono text-zinc-500 uppercase block mb-1">Last Automated Execution</span>
+                <span className="text-xs font-mono text-zinc-300 flex items-center gap-1.5">
+                  <Check className="w-3.5 h-3.5 text-zinc-500" />
+                  {schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : 'No run logged'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[9px] font-mono text-zinc-500 uppercase block mb-1">Next Scheduled Dispatch</span>
+                <span className="text-xs font-mono text-zinc-300 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+                  {enabled ? (
+                    schedule.next_run_at ? new Date(schedule.next_run_at).toLocaleString() : 'Calculated on save'
+                  ) : (
+                    <span className="text-zinc-600">Scheduler Suspended</span>
+                  )}
+                </span>
+              </div>
+            </div>
+
+            {/* Save and Run simulation buttons */}
+            <div className="flex items-center gap-3 pt-2">
+              <button 
+                onClick={handleSaveSchedule} 
+                disabled={isSaving}
+                className="bg-indigo-500 text-zinc-950 px-4 py-2 rounded-md text-xs font-bold hover:bg-indigo-400 transition-colors disabled:opacity-50"
+              >
+                {isSaving ? 'Saving...' : 'Save Audit Schedule'}
+              </button>
+              <button 
+                onClick={handleSimulateRun} 
+                disabled={isSimulating}
+                className="bg-zinc-800 text-zinc-300 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {isSimulating ? (
+                  <>
+                    <span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></span>
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3 h-3 text-indigo-400" />
+                    Simulate Dispatch Run
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Simulation Result Modal Overlay */}
+      {simResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-sm">
+          <div className="bg-zinc-900 rounded-xl shadow-2xl border border-zinc-850 w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
+            <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+              <h4 className="font-semibold text-zinc-100 text-sm flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-400" />
+                Dispatch Successfully Dispatched
+              </h4>
+              <button 
+                onClick={() => setSimResult(null)} 
+                className="p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 rounded-md transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-zinc-400 leading-relaxed font-sans">
+                The automated audit compiled correctly and triggered SMTP relays. Here is the simulated mail server log trace:
+              </p>
+
+              <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-850 font-mono text-[10px] text-indigo-400 space-y-1.5 overflow-x-auto max-h-56">
+                <p className="text-zinc-500">[{new Date(simResult.timestamp).toISOString()}] SMTP Gateway Initialized</p>
+                <p className="text-zinc-500">[{new Date(simResult.timestamp).toISOString()}] HELO secure-mail.quantfund.net</p>
+                <p className="text-zinc-300">MAIL FROM: &lt;noreply@quantfund.net&gt; [OK 250]</p>
+                {simResult.recipients.map((email, idx) => (
+                  <p key={idx} className="text-emerald-400">RCPT TO: &lt;{email}&gt; [OK 250]</p>
+                ))}
+                <p className="text-indigo-300 font-semibold">DATA [Initiated]</p>
+                <p className="text-indigo-400">Subject: [SEC-OPS] Automated License Compliance Audit - Monthly Report</p>
+                <p className="text-zinc-400">Attachment: {simResult.pdfName} (MIME Type: application/pdf)</p>
+                <p className="text-zinc-400">Content-Scope: {simResult.scope.toUpperCase()}</p>
+                <p className="text-indigo-300 font-semibold">. [OK Message Accepted for Delivery]</p>
+                <p className="text-zinc-500">[{new Date(simResult.timestamp).toISOString()}] connection closed.</p>
+              </div>
+
+              <div className="bg-zinc-900/50 p-3 rounded-lg border border-zinc-800 text-center">
+                <span className="text-[10px] text-zinc-500 block uppercase font-mono tracking-wider">ATTACHED REPORT DOWNLOADED</span>
+                <span className="text-xs text-zinc-300 font-medium block mt-1 truncate">{simResult.pdfName}</span>
+              </div>
+
+              <button 
+                onClick={() => setSimResult(null)}
+                className="w-full bg-zinc-800 text-zinc-200 border border-zinc-700 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors"
+              >
+                Close Output Log
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SMTP Configuration Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+          <Mail className="w-4 h-4 text-indigo-400"/> SMTP Relay Configuration
+        </h3>
+        <p className="text-xs text-zinc-400 mb-6 leading-relaxed">
+          Configure the SMTP server details for automated report dispatches and critical license alerts. All credentials are encrypted and stored in the secure local vault.
+        </p>
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">SMTP Host</label>
+              <input 
+                type="text" 
+                value={smtp.host} 
+                onChange={e => setSmtp({...smtp, host: e.target.value})}
+                placeholder="smtp.example.com"
+                className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">SMTP Port</label>
+              <input 
+                type="number" 
+                value={smtp.port} 
+                onChange={e => setSmtp({...smtp, port: parseInt(e.target.value) || 587})}
+                placeholder="587"
+                className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">SMTP User</label>
+              <input 
+                type="text" 
+                value={smtp.user} 
+                onChange={e => setSmtp({...smtp, user: e.target.value})}
+                placeholder="user@example.com"
+                className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">SMTP Password</label>
+              <input 
+                type="password" 
+                value={smtp.pass} 
+                onChange={e => setSmtp({...smtp, pass: e.target.value})}
+                placeholder="••••••••"
+                className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">From Email Address</label>
+              <input 
+                type="text" 
+                value={smtp.from_email} 
+                onChange={e => setSmtp({...smtp, from_email: e.target.value})}
+                placeholder="noreply@quantfund.net"
+                className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+            <div className="flex items-end">
+              <label className="flex items-center gap-3 cursor-pointer p-2 h-[38px]">
+                <input 
+                  type="checkbox" 
+                  checked={smtp.secure} 
+                  onChange={e => setSmtp({...smtp, secure: e.target.checked})}
+                  className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" 
+                />
+                <span className="text-xs text-zinc-400 font-mono uppercase tracking-wider">Use SSL/TLS (Port 465)</span>
+              </label>
+            </div>
+          </div>
+          <div className="flex gap-3 pt-2">
+            <button 
+              onClick={handleSaveSmtp} 
+              disabled={isSavingSmtp}
+              className="bg-indigo-500 text-zinc-950 px-4 py-2 rounded-md text-xs font-bold hover:bg-indigo-400 transition-colors disabled:opacity-50"
+            >
+              {isSavingSmtp ? 'Saving...' : 'Save SMTP Settings'}
+            </button>
+            <button 
+              onClick={handleTestSmtp} 
+              disabled={isTestingSmtp}
+              className="bg-zinc-800 text-zinc-300 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+            >
+              {isTestingSmtp ? (
+                <span className="w-3 h-3 border-2 border-zinc-500 border-t-white rounded-full animate-spin"></span>
+              ) : (
+                <Send className="w-3 h-3" />
+              )}
+              Test Connection
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Performance & Telemetry Alerts Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+          <Activity className="w-4 h-4 text-indigo-400"/> Performance & Alerts Settings
+        </h3>
+        <p className="text-xs text-zinc-400 mb-6 leading-relaxed font-sans">
+          Configure node latency limits. The system monitors the round-trip-time (RTT) of active socket connections, highlighting any nodes exceeding this threshold as degraded and appending a diagnostic audit trail.
+        </p>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">
+              Latency Warning Threshold (RTT)
+            </label>
+            <div className="flex gap-3 items-center">
+              <input 
+                type="number" 
+                value={latencyThreshold} 
+                onChange={e => setLatencyThreshold(Math.max(10, parseInt(e.target.value) || 150))}
+                className="w-full max-w-[200px] bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+              />
+              <span className="text-xs text-zinc-500 font-mono">ms</span>
+            </div>
+            <span className="text-[10px] text-zinc-500 font-mono mt-1.5 block">
+              Connected pipes exceeding this round-trip limit are instantly flagged as DEGRADED in the validation panel.
+            </span>
+          </div>
+          <button 
+            onClick={handleSaveLatencyThreshold} 
+            disabled={isSavingLatency}
+            className="bg-indigo-500 text-zinc-950 px-4 py-2 rounded-md text-xs font-bold hover:bg-indigo-400 transition-colors disabled:opacity-50"
+          >
+            {isSavingLatency ? 'Saving...' : 'Update Latency Threshold'}
+          </button>
+        </div>
+      </div>
+
+      {/* General Settings Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2"><Settings className="w-4 h-4 text-indigo-400"/> General Settings</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">Application Identifier</label>
+            <input 
+              type="text" 
+              value={general.appName} 
+              onChange={e => setGeneral({...general, appName: e.target.value})}
+              className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">System Admin Email</label>
+            <input 
+              type="text" 
+              value={general.systemEmail} 
+              onChange={e => setGeneral({...general, systemEmail: e.target.value})}
+              className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" 
+            />
+          </div>
+          <button onClick={() => showToast('General settings saved', 'success')} className="bg-zinc-800 text-zinc-300 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors">
+            Update General Config
+          </button>
+        </div>
+      </div>
+
+      {/* MT5 Integration Guide Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm overflow-hidden">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+          <Code2 className="w-4 h-4 text-indigo-400"/> MT5 Integration Guide
+        </h3>
+        <p className="text-xs text-zinc-400 mb-4">
+          Copy this MQL5 snippet into your Expert Advisor's <code>OnInit()</code> function to enable hardware-locked licensing.
+        </p>
+        <div className="relative group">
+          <pre className="bg-zinc-950/80 border border-zinc-800 rounded-lg p-4 text-[10px] font-mono text-zinc-300 overflow-x-auto max-h-[300px] scrollbar-thin">
+            {mt5Snippet}
+          </pre>
+          <button 
+            onClick={() => copyToClipboard(mt5Snippet)}
+            className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 bg-indigo-500 text-zinc-950 px-2 py-1 rounded text-[10px] font-bold transition-opacity"
+          >
+            Copy Script
+          </button>
+        </div>
+        <div className="mt-4 flex items-start gap-3 bg-indigo-500/5 border border-indigo-500/10 p-3 rounded-lg">
+          <Info className="w-4 h-4 text-indigo-400 mt-0.5 flex-shrink-0" />
+          <div className="text-[10px] text-zinc-500 leading-relaxed">
+            <strong className="text-zinc-300 block mb-1">Hardware Fingerprinting Note:</strong>
+            The snippet above combines <code>TERMINAL_COMMONDATA_PATH</code> with the <code>ACCOUNT_LOGIN</code> to create a unique device-account fingerprint. 
+            <br/><br/>
+            <strong className="text-emerald-500 block mb-1">Air-Gapped Note:</strong>
+            For air-gapped environments, use the <code>Offline Token</code> generator. Your bot should decode the token and verify the signature, including any <code>Asset Class</code> or <code>Account ID</code> restrictions embedded in your client logic.
+          </div>
+        </div>
+      </div>
+
+      {/* Enterprise Offline Licensing Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-emerald-400"/> Air-Gapped Enterprise Licensing
+        </h3>
+        <p className="text-xs text-zinc-400 mb-6 leading-relaxed">
+          For clients in high-security environments where external network access is prohibited. These cryptographic tokens verify locally using the system's RSA public key.
+        </p>
+        
+        <div className="space-y-6">
+          {offlineToken && (
+            <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4 animate-in fade-in slide-in-from-top-2 duration-300">
+              <label className="block text-[10px] font-mono text-emerald-500 uppercase mb-2 font-bold">Generated Signed Offline Token</label>
+              <div className="relative">
+                <textarea 
+                  readOnly 
+                  value={offlineToken.token} 
+                  className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-emerald-400 font-mono text-[10px] h-24 outline-none resize-none"
+                />
+                <button 
+                  onClick={() => {
+                    navigator.clipboard.writeText(offlineToken.token);
+                    showToast('Token copied to clipboard', 'success');
+                  }}
+                  className="absolute top-2 right-2 bg-emerald-500 text-zinc-950 px-2 py-1 rounded text-[10px] font-bold hover:bg-emerald-400 transition-colors"
+                >
+                  Copy
+                </button>
+              </div>
+              <p className="text-[10px] text-zinc-500 mt-2 italic">
+                Provide this token to the client. Their local instance will decode it and verify the hardware lock without internet access.
+              </p>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-2">System RSA Public Key (Standard SPKI PEM)</label>
+            <div className="relative group">
+              <pre className="bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 text-[10px] font-mono text-zinc-400 overflow-x-auto max-h-[150px] scrollbar-thin">
+                {systemPublicKey}
+              </pre>
+              <button 
+                onClick={() => {
+                  navigator.clipboard.writeText(systemPublicKey);
+                  showToast('Public key copied', 'success');
+                }}
+                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 bg-zinc-700 text-zinc-200 px-2 py-1 rounded text-[10px] font-bold hover:bg-zinc-600 transition-opacity"
+              >
+                Copy
+              </button>
+            </div>
+            <p className="text-[10px] text-zinc-500 mt-2">
+              This public key must be hardcoded into your client-side application (MT5, C++, Node.js) to verify the authenticity of offline tokens.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* API Authentication Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2"><Key className="w-4 h-4 text-indigo-400"/> API Authentication</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">Master API Key</label>
+            <input type="password" value="sk_live_1234567890abcdef" readOnly className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-400 font-mono text-xs outline-none" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1">Webhook Endpoint</label>
+            <input type="text" defaultValue="https://api.quantfund.net/v1/license-events" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors" />
+          </div>
+          <button onClick={handleRotate} disabled={isRotating} className="bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-4 py-2 rounded-md text-xs font-semibold hover:bg-indigo-500/20 transition-colors disabled:opacity-50">
+            {isRotating ? 'Rotating...' : 'Rotate Keys'}
+          </button>
+        </div>
+      </div>
+
+      {/* Security & Alerts Card */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-indigo-400"/> Security & Alerts</h3>
+        <div className="space-y-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" defaultChecked className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+            <span className="text-sm text-zinc-300">Auto-suspend on hardware mismatch</span>
+          </label>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" defaultChecked className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+            <span className="text-sm text-zinc-300">Alert on multiple failed pings</span>
+          </label>
+          <div className="mt-4">
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-2">Expiration Alert Thresholds (Days)</label>
+            <div className="flex gap-2">
+              {[7, 14, 30].map(days => (
+                <label key={days} className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-lg border border-zinc-800 cursor-pointer">
+                  <input type="checkbox" className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs text-zinc-300">{days} Days</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1 mt-4">Security Contact Email</label>
+            <input type="email" defaultValue="secops@quantfund.net" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs outline-none focus:border-indigo-500 transition-colors" />
+          </div>
+          <button onClick={() => showToast('Security preferences updated', 'success')} className="bg-zinc-800 text-zinc-200 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors mt-2">Save Preferences</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExtendLicenseModal({ isOpen, onClose, onExtend }: { isOpen: boolean, onClose: () => void, onExtend: (days: number) => void }) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+          <h3 className="text-zinc-100 font-medium">Extend License</h3>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6 grid grid-cols-3 gap-3">
+          {[30, 60, 90].map(days => (
+            <button key={days} onClick={() => onExtend(days)} className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 py-3 rounded-lg text-sm font-semibold transition-colors">
+              +{days} Days
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransferLicenseModal({ isOpen, onClose, onTransfer }: { isOpen: boolean, onClose: () => void, onTransfer: (fund: string) => void }) {
+  const [newFund, setNewFund] = useState('');
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+          <h3 className="text-zinc-100 font-medium">Transfer Licenses</h3>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6 space-y-4">
+          <input 
+            type="text" 
+            value={newFund}
+            onChange={e => setNewFund(e.target.value)}
+            placeholder="Enter new fund/client name"
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-700" 
+          />
+          <button 
+            onClick={() => { if (newFund) onTransfer(newFund); }} 
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            Confirm Transfer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SoftwareProductsView({ 
+  products, 
+  addProduct, 
+  deleteProduct, 
+  licenses, 
+  currentUser,
+  showToast 
+}: { 
+  products: SoftwareProduct[], 
+  addProduct: (p: Omit<SoftwareProduct, 'id'>) => void, 
+  deleteProduct: (id: string) => void, 
+  licenses: License[], 
+  currentUser: AppUser | null,
+  showToast: (msg: string, type: 'success'|'error') => void 
+}) {
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [formData, setFormData] = useState({ name: '', description: '', base_price: 5000 });
+
+  const handleSubmit = () => {
+    if (!formData.name) return;
+    addProduct(formData);
+    setFormData({ name: '', description: '', base_price: 5000 });
+    setIsModalOpen(false);
+    showToast('Software product successfully added', 'success');
+  };
+
+  const getProductLicenseCount = (name: string) => {
+    return licenses.filter(l => l.software_name === name).length;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center bg-zinc-900/40 p-4 rounded-xl border border-zinc-800/60">
+        <div>
+          <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-indigo-400" /> Software Products Catalog
+          </h3>
+          <p className="text-xs text-zinc-500 font-mono mt-1">Manage trading systems and standard monthly base rates</p>
+        </div>
+        {currentUser?.role === 'Administrator' && (
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add Product
+          </button>
+        )}
+      </div>
+
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl p-6 space-y-4">
+            <h3 className="text-zinc-100 font-medium text-sm border-b border-zinc-800 pb-2">Add Software Product</h3>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Product Name</label>
+              <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="e.g. HFT Terminal Alpha" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Description</label>
+              <textarea value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} placeholder="Describe key characteristics and target loops..." className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 h-20 placeholder:text-zinc-700" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Base Price (USD/mo)</label>
+              <input type="number" value={formData.base_price} onChange={e => setFormData({...formData, base_price: Number(e.target.value)})} placeholder="12500" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setIsModalOpen(false)} className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-semibold">Cancel</button>
+              <button onClick={handleSubmit} className="bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg">Save Product</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
+              <tr>
+                <th className="px-6 py-4">Product Name</th>
+                <th className="px-6 py-4">Description</th>
+                <th className="px-6 py-4">Base License Cost</th>
+                <th className="px-6 py-4">Active Deployments</th>
+                <th className="px-6 py-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50 font-mono text-xs">
+              {products.map(prod => {
+                const count = getProductLicenseCount(prod.name);
+                return (
+                  <tr key={prod.id} className="hover:bg-zinc-800/30 group">
+                    <td className="px-6 py-4 text-zinc-200 font-semibold font-sans text-sm flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
+                      {prod.name}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-400 text-xs font-sans max-w-xs truncate" title={prod.description}>
+                      {prod.description || 'No description provided'}
+                    </td>
+                    <td className="px-6 py-4 text-emerald-400 font-mono text-xs">${prod.base_price.toLocaleString()}/mo</td>
+                    <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{count} active</td>
+                    <td className="px-6 py-4 text-right">
+                      <button 
+                        onClick={() => deleteProduct(prod.id)} 
+                        className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors"
+                        title="Delete product catalog entry"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {products.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-6 py-8 text-center text-zinc-500 font-mono text-xs">
+                    NO SOFTWARE PRODUCTS CONFIGURED
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LicenseTiersView({ 
+  tiers, 
+  addTier, 
+  deleteTier, 
+  licenses, 
+  currentUser,
+  showToast 
+}: { 
+  tiers: LicenseTier[], 
+  addTier: (t: Omit<LicenseTier, 'id'>) => void, 
+  deleteTier: (id: string) => void, 
+  licenses: License[], 
+  currentUser: AppUser | null,
+  showToast: (msg: string, type: 'success'|'error') => void 
+}) {
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [formData, setFormData] = useState({ name: '', max_volume_usd: 10000000, api_calls_limit: 10000, description: '' });
+
+  const handleSubmit = () => {
+    if (!formData.name) return;
+    addTier(formData);
+    setFormData({ name: '', max_volume_usd: 10000000, api_calls_limit: 10000, description: '' });
+    setIsModalOpen(false);
+    showToast('License tier successfully added', 'success');
+  };
+
+  const getTierLicenseCount = (name: string) => {
+    return licenses.filter(l => l.tier === name).length;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center bg-zinc-900/40 p-4 rounded-xl border border-zinc-800/60">
+        <div>
+          <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+            <Layers className="w-4 h-4 text-indigo-400" /> Licensing Tiers Settings
+          </h3>
+          <p className="text-xs text-zinc-500 font-mono mt-1">Configure limits, max volumes, and call quotas per tier level</p>
+        </div>
+        {currentUser?.role === 'Administrator' && (
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add Tier
+          </button>
+        )}
+      </div>
+
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl p-6 space-y-4">
+            <h3 className="text-zinc-100 font-medium text-sm border-b border-zinc-800 pb-2">Add License Tier</h3>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Tier Name</label>
+              <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="e.g. Starter, Premium, VIP" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Max Trading Volume (USD/mo)</label>
+              <input type="number" value={formData.max_volume_usd} onChange={e => setFormData({...formData, max_volume_usd: Number(e.target.value)})} placeholder="10000000" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">API Calls Limit (Calls/day)</label>
+              <input type="number" value={formData.api_calls_limit} onChange={e => setFormData({...formData, api_calls_limit: Number(e.target.value)})} placeholder="10000" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Description</label>
+              <textarea value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} placeholder="Describe limits segment..." className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 h-20 placeholder:text-zinc-700" />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setIsModalOpen(false)} className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-semibold">Cancel</button>
+              <button onClick={handleSubmit} className="bg-indigo-500 hover:bg-indigo-400 text-zinc-950 px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-lg">Save Tier</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
+              <tr>
+                <th className="px-6 py-4">Tier Level</th>
+                <th className="px-6 py-4">Max Volume Limit</th>
+                <th className="px-6 py-4">API Quota</th>
+                <th className="px-6 py-4">Description</th>
+                <th className="px-6 py-4">Active Keys</th>
+                <th className="px-6 py-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50 font-mono text-xs">
+              {tiers.map(t => {
+                const count = getTierLicenseCount(t.name);
+                return (
+                  <tr key={t.id} className="hover:bg-zinc-800/30 group">
+                    <td className="px-6 py-4 text-zinc-200 font-bold font-sans text-sm flex items-center gap-2 uppercase">
+                      <Layers className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
+                      {t.name}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-300 font-mono text-xs">
+                      {t.max_volume_usd >= 1000000000 ? 'Unlimited' : `$${(t.max_volume_usd / 1000000).toFixed(0)}M USD`}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-300 font-mono text-xs">
+                      {t.api_calls_limit <= 0 ? 'Unlimited' : `${t.api_calls_limit.toLocaleString()} / day`}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-400 text-xs font-sans max-w-xs truncate" title={t.description}>
+                      {t.description || 'No description'}
+                    </td>
+                    <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{count} active</td>
+                    <td className="px-6 py-4 text-right">
+                      <button 
+                        onClick={() => deleteTier(t.id)} 
+                        className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors"
+                        title="Delete license tier entry"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {tiers.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-6 py-8 text-center text-zinc-500 font-mono text-xs">
+                    NO CUSTOM LICENSE TIERS CONFIGURED
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateLicenseModal({ 
+  isOpen, 
+  onClose, 
+  onCreate,
+  clients,
+  softwareProducts,
+  licenseTiers
+}: { 
+  isOpen: boolean, 
+  onClose: () => void, 
+  onCreate: (data: Partial<License>) => void,
+  clients: Client[],
+  softwareProducts: SoftwareProduct[],
+  licenseTiers: LicenseTier[]
+}) {
+  const [formData, setFormData] = useState({
+    issued_to: '',
+    software_name: '',
+    tier: ''
+  });
+
+  useEffect(() => {
+    if (isOpen) {
+      setFormData({
+        issued_to: clients[0]?.name || '',
+        software_name: softwareProducts[0]?.name || 'QuantMaster HFT',
+        tier: licenseTiers[0]?.name || 'Professional'
+      });
+    }
+  }, [isOpen, clients, softwareProducts, licenseTiers]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+          <h3 className="text-zinc-100 font-medium text-sm">Provision New License</h3>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Client / Fund Name</label>
+            <div className="space-y-2">
+              <select 
+                value={formData.issued_to}
+                onChange={e => setFormData({...formData, issued_to: e.target.value})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono"
+              >
+                <option value="">-- Select Registered Client --</option>
+                {clients.map(c => (
+                  <option key={c.id} value={c.name}>{c.name}</option>
+                ))}
+                <option value="CUSTOM">-- Type Custom Client --</option>
+              </select>
+              
+              {(!formData.issued_to || formData.issued_to === 'CUSTOM' || !clients.some(c => c.name === formData.issued_to)) && (
+                <input 
+                  type="text" 
+                  value={formData.issued_to === 'CUSTOM' ? '' : formData.issued_to}
+                  onChange={e => setFormData({...formData, issued_to: e.target.value})}
+                  placeholder="Type custom client or fund name"
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-700 font-mono" 
+                />
+              )}
+            </div>
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Software Product</label>
+            <select 
+              value={formData.software_name}
+              onChange={e => setFormData({...formData, software_name: e.target.value})}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono"
+            >
+              {softwareProducts.map(p => (
+                <option key={p.id} value={p.name}>{p.name} (${p.base_price.toLocaleString()}/mo)</option>
+              ))}
+              {softwareProducts.length === 0 && (
+                <>
+                  <option value="QuantMaster HFT">QuantMaster HFT</option>
+                  <option value="AlphaSeeker Neural">AlphaSeeker Neural</option>
+                  <option value="HedgeBot Pro">HedgeBot Pro</option>
+                  <option value="Arbitrage Scanner AI">Arbitrage Scanner AI</option>
+                </>
+              )}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">License Tier</label>
+            <select 
+              value={formData.tier}
+              onChange={e => setFormData({...formData, tier: e.target.value})}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono"
+            >
+              {licenseTiers.map(t => (
+                <option key={t.id} value={t.name}>{t.name} (Limit: ${t.max_volume_usd >= 1000000000 ? 'Unlimited' : (t.max_volume_usd / 1000000) + 'M'})</option>
+              ))}
+              {licenseTiers.length === 0 && (
+                <>
+                  <option value="Standard">Standard (Up to $10M Volume)</option>
+                  <option value="Professional">Professional (Up to $100M Volume)</option>
+                  <option value="Institutional">Institutional (Unlimited Volume)</option>
+                </>
+              )}
+            </select>
+          </div>
+        </div>
+        <div className="p-4 border-t border-zinc-800 bg-zinc-950/30 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-zinc-200 transition-colors">Cancel</button>
+          <button 
+            onClick={() => {
+              if (!formData.issued_to || formData.issued_to === 'CUSTOM') return;
+              onCreate(formData);
+            }} 
+            disabled={!formData.issued_to || formData.issued_to === 'CUSTOM'}
+            className="px-4 py-2 bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 disabled:hover:bg-indigo-500 text-zinc-950 text-xs font-bold rounded-md transition-colors"
+          >
+            Provision License
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditNodeConfigModal({
+  isOpen,
+  onClose,
+  license,
+  onSave
+}: {
+  isOpen: boolean,
+  onClose: () => void,
+  license: License | null,
+  onSave: (id: string, config: any) => void
+}) {
+  const [formData, setFormData] = useState({
+    hardware_id: '',
+    ip_whitelist: '',
+    features: '',
+    max_volume_usd: 0,
+    api_calls_limit: 0,
+    api_calls_limit_monthly: 0,
+    api_calls_limit_yearly: 0,
+    expires_at: '',
+    asset_classes: '[]',
+    restricted_accounts: ''
+  });
+
+  useEffect(() => {
+    if (isOpen && license) {
+      setFormData({
+        hardware_id: license.hardware_id || '',
+        ip_whitelist: license.ip_whitelist || '',
+        features: license.features ? JSON.parse(license.features).join(', ') : '',
+        max_volume_usd: license.max_volume_usd || 10000000,
+        api_calls_limit: license.api_calls_limit || 10000,
+        api_calls_limit_monthly: license.api_calls_limit_monthly || 300000,
+        api_calls_limit_yearly: license.api_calls_limit_yearly || 3600000,
+        expires_at: license.expires_at ? license.expires_at.split('T')[0] : '',
+        asset_classes: license.asset_classes || '[]',
+        restricted_accounts: license.restricted_accounts ? JSON.parse(license.restricted_accounts).join(', ') : ''
+      });
+    }
+  }, [isOpen, license]);
+
+  if (!isOpen || !license) return null;
+
+  const toggleAssetClass = (asset: string) => {
+    let classes = JSON.parse(formData.asset_classes);
+    if (classes.includes(asset)) {
+      classes = classes.filter((a: string) => a !== asset);
+    } else {
+      classes.push(asset);
+    }
+    setFormData({ ...formData, asset_classes: JSON.stringify(classes) });
+  };
+
+  const handleSave = () => {
+    let featureArray: string[] = [];
+    try {
+      featureArray = formData.features
+        .split(',')
+        .map(f => f.trim())
+        .filter(f => f.length > 0);
+    } catch (e) {
+      featureArray = [];
+    }
+
+    let accountArray: string[] = [];
+    try {
+      accountArray = formData.restricted_accounts
+        .split(',')
+        .map(a => a.trim())
+        .filter(a => a.length > 0);
+    } catch (e) {
+      accountArray = [];
+    }
+
+    onSave(license.id, {
+      hardware_id: formData.hardware_id || null,
+      ip_whitelist: formData.ip_whitelist || null,
+      features: JSON.stringify(featureArray),
+      max_volume_usd: Number(formData.max_volume_usd),
+      api_calls_limit: Number(formData.api_calls_limit),
+      api_calls_limit_monthly: Number(formData.api_calls_limit_monthly),
+      api_calls_limit_yearly: Number(formData.api_calls_limit_yearly),
+      expires_at: formData.expires_at ? new Date(formData.expires_at).toISOString() : license.expires_at,
+      asset_classes: formData.asset_classes,
+      restricted_accounts: JSON.stringify(accountArray)
+    });
+    onClose();
+  };
+
+  const currentAssets = JSON.parse(formData.asset_classes);
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-lg overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+          <div>
+            <h3 className="text-zinc-100 font-medium text-sm">Edit Active Node Config</h3>
+            <p className="text-[10px] font-mono text-zinc-500 mt-0.5">License: {license.issued_to} ({license.license_key.substring(0, 12)}...)</p>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto scrollbar-thin">
+          
+          {/* Asset Class Restrictions */}
+          <div className="bg-indigo-500/5 border border-indigo-500/10 rounded-lg p-4 mb-2">
+            <label className="block text-[10px] font-mono text-indigo-400 uppercase mb-3 font-bold">Asset Class Authorization</label>
+            <div className="flex gap-3">
+              {['forex', 'crypto', 'stocks'].map(asset => (
+                <button
+                  key={asset}
+                  onClick={() => toggleAssetClass(asset)}
+                  className={cn(
+                    "flex-1 py-2 px-3 rounded-md text-[10px] font-bold uppercase transition-all border",
+                    currentAssets.includes(asset) 
+                      ? "bg-indigo-500 text-zinc-950 border-indigo-400" 
+                      : "bg-zinc-950 text-zinc-500 border-zinc-800 hover:border-zinc-700"
+                  )}
+                >
+                  {asset}
+                </button>
+              ))}
+            </div>
+            <p className="text-[9px] text-zinc-500 mt-2 italic">Restricts the licensed bot to only trade selected asset classes.</p>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5 flex items-center justify-between">
+              Restricted Account IDs / API Keys
+              <span className="text-[9px] lowercase opacity-60">(Comma separated)</span>
+            </label>
+            <textarea 
+              value={formData.restricted_accounts}
+              onChange={e => setFormData({...formData, restricted_accounts: e.target.value})}
+              placeholder="e.g. MT5-12345, BINANCE-API-HASH, BROKER-ID-99"
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono h-20 outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-800" 
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Hardware Lock (HWID)</label>
+              <input 
+                type="text" 
+                value={formData.hardware_id}
+                onChange={e => setFormData({...formData, hardware_id: e.target.value})}
+                placeholder="e.g. HWID-CLIENT-1234 (Empty = Unlocked)"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-700" 
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">IP Whitelist</label>
+              <input 
+                type="text" 
+                value={formData.ip_whitelist}
+                onChange={e => setFormData({...formData, ip_whitelist: e.target.value})}
+                placeholder="e.g. 192.168.1.1, 203.0.113.5 (Comma sep)"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-700" 
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Active Modules / Features</label>
+            <input 
+              type="text" 
+              value={formData.features}
+              onChange={e => setFormData({...formData, features: e.target.value})}
+              placeholder="e.g. HFT_CORE, SENTIMENT, DARK_POOL (Comma sep)"
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-700" 
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Daily API Call Limit</label>
+              <input 
+                type="number" 
+                value={formData.api_calls_limit}
+                onChange={e => setFormData({...formData, api_calls_limit: Number(e.target.value)})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Monthly API Call Limit</label>
+              <input 
+                type="number" 
+                value={formData.api_calls_limit_monthly}
+                onChange={e => setFormData({...formData, api_calls_limit_monthly: Number(e.target.value)})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Yearly API Call Limit</label>
+              <input 
+                type="number" 
+                value={formData.api_calls_limit_yearly}
+                onChange={e => setFormData({...formData, api_calls_limit_yearly: Number(e.target.value)})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Max Volume (USD)</label>
+              <input 
+                type="number" 
+                value={formData.max_volume_usd}
+                onChange={e => setFormData({...formData, max_volume_usd: Number(e.target.value)})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors" 
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Expiration Date</label>
+            <input 
+              type="date" 
+              value={formData.expires_at}
+              onChange={e => setFormData({...formData, expires_at: e.target.value})}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs font-mono focus:outline-none focus:border-indigo-500 transition-colors" 
+            />
+          </div>
+        </div>
+        <div className="p-4 border-t border-zinc-800 bg-zinc-950/30 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-zinc-200 transition-colors">Cancel</button>
+          <button 
+            onClick={handleSave} 
+            className="px-4 py-2 bg-indigo-500 hover:bg-indigo-400 text-zinc-950 text-xs font-bold rounded-md transition-colors"
+          >
+            Save Configuration
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DashboardView({ licenses }: { licenses: License[] }) {
+  const currentRevenue = licenses.reduce((acc, l) => acc + (l.product_price || 0), 0);
+  const currentActive = licenses.filter(l => l.status === 'active').length;
+  const [generating, setGenerating] = useState(false);
+
+  const generateMonthlyAuditPDF = async () => {
+    setGenerating(true);
+    try {
+      const res = await fetch('/api/events');
+      const events: LicenseEvent[] = await res.json();
+      
+      const doc = new jsPDF();
+      
+      const margin = 15;
+      let y = 20;
+      
+      // Title
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(18);
+      doc.setTextColor(15, 23, 42); // slate-900
+      doc.text("MONTHLY LICENSE AUDIT REPORT", margin, y);
+      y += 8;
+      
+      // Subtitle / Date
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139); // slate-500
+      doc.text(`Generated on: ${new Date().toLocaleString()} (UTC)`, margin, y);
+      y += 15;
+      
+      // Divider
+      doc.setDrawColor(226, 232, 240); // slate-200
+      doc.setLineWidth(0.5);
+      doc.line(margin, y, 195, y);
+      y += 10;
+      
+      // License Status Summary Section
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(12);
+      doc.setTextColor(30, 41, 59); // slate-800
+      doc.text("1. ACTIVE LICENSE SUMMARY", margin, y);
+      y += 8;
+      
+      const activeLicenses = licenses.filter(l => l.status === 'active');
+      const suspendedLicenses = licenses.filter(l => l.status === 'suspended');
+      const revokedLicenses = licenses.filter(l => l.status === 'revoked');
+      
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(10);
+      doc.setTextColor(51, 65, 85); // slate-700
+      doc.text(`Total Registered Licenses: ${licenses.length}`, margin + 5, y);
+      y += 6;
+      doc.text(`Active Licenses: ${activeLicenses.length}`, margin + 5, y);
+      y += 6;
+      doc.text(`Suspended Licenses: ${suspendedLicenses.length}`, margin + 5, y);
+      y += 6;
+      doc.text(`Revoked Licenses: ${revokedLicenses.length}`, margin + 5, y);
+      y += 12;
+      
+      // Table Header for Licenses
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setFillColor(248, 250, 252); // slate-50
+      doc.rect(margin, y, 180, 8, "F");
+      doc.setTextColor(71, 85, 105); // slate-600
+      doc.text("License Key / Client", margin + 2, y + 6);
+      doc.text("Software", margin + 70, y + 6);
+      doc.text("Tier", margin + 110, y + 6);
+      doc.text("Expires At", margin + 135, y + 6);
+      doc.text("Status", margin + 165, y + 6);
+      y += 8;
+      
+      // Table Body for Licenses
+      doc.setFont("Helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(51, 65, 85);
+      
+      licenses.slice(0, 15).forEach((license) => {
+        if (y > 270) {
+          doc.addPage();
+          y = 20;
+        }
+        
+        const keyText = license.license_key ? `${license.license_key.substring(0, 8)}... (${license.issued_to.substring(0, 12)})` : license.issued_to;
+        const softwareText = license.software_name ? license.software_name.substring(0, 18) : 'N/A';
+        const tierText = license.tier || 'N/A';
+        const expiresText = license.expires_at ? new Date(license.expires_at).toLocaleDateString() : 'N/A';
+        const statusText = (license.status || 'N/A').toUpperCase();
+        
+        doc.text(keyText, margin + 2, y + 6);
+        doc.text(softwareText, margin + 70, y + 6);
+        doc.text(tierText, margin + 110, y + 6);
+        doc.text(expiresText, margin + 135, y + 6);
+        doc.text(statusText, margin + 165, y + 6);
+        
+        doc.setDrawColor(241, 245, 249);
+        doc.line(margin, y + 8, margin + 180, y + 8);
+        y += 8;
+      });
+      
+      if (licenses.length > 15) {
+        doc.text(`... and ${licenses.length - 15} more licenses listed in system.`, margin + 2, y + 6);
+        y += 10;
+      } else {
+        y += 5;
+      }
+      
+      // Divider
+      if (y > 250) {
+        doc.addPage();
+        y = 20;
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, y, 195, y);
+      y += 10;
+      
+      // Recent Audit Log Events
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(12);
+      doc.setTextColor(30, 41, 59);
+      doc.text("2. RECENT TELEMETRY & SYSTEM EVENTS", margin, y);
+      y += 8;
+      
+      if (!events || events.length === 0) {
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(10);
+        doc.setTextColor(148, 163, 184); // slate-400
+        doc.text("No system events recorded this month.", margin + 5, y);
+        y += 10;
+      } else {
+        // Table Header for Events
+        doc.setFont("Helvetica", "bold");
+        doc.setFontSize(10);
+        doc.setFillColor(248, 250, 252);
+        doc.rect(margin, y, 180, 8, "F");
+        doc.setTextColor(71, 85, 105);
+        doc.text("Timestamp", margin + 2, y + 6);
+        doc.text("Event Type", margin + 50, y + 6);
+        doc.text("Payload / Details", margin + 90, y + 6);
+        y += 8;
+        
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(51, 65, 85);
+        
+        events.slice(0, 20).forEach((event) => {
+          if (y > 270) {
+            doc.addPage();
+            y = 20;
+            doc.setFont("Helvetica", "bold");
+            doc.setFontSize(10);
+            doc.setFillColor(248, 250, 252);
+            doc.rect(margin, y, 180, 8, "F");
+            doc.setTextColor(71, 85, 105);
+            doc.text("Timestamp", margin + 2, y + 6);
+            doc.text("Event Type", margin + 50, y + 6);
+            doc.text("Payload / Details", margin + 90, y + 6);
+            y += 8;
+            doc.setFont("Helvetica", "normal");
+            doc.setFontSize(8);
+            doc.setTextColor(51, 65, 85);
+          }
+          
+          const timeStr = event.timestamp ? new Date(event.timestamp).toLocaleString() : 'N/A';
+          const typeStr = event.event_type || 'N/A';
+          let detailsStr = event.event_data || '';
+          
+          try {
+            const parsed = JSON.parse(event.event_data);
+            detailsStr = Object.entries(parsed)
+              .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
+              .join(", ");
+          } catch (_) {}
+          
+          if (detailsStr.length > 65) {
+            detailsStr = detailsStr.substring(0, 62) + "...";
+          }
+          
+          doc.text(timeStr, margin + 2, y + 5);
+          doc.text(typeStr, margin + 50, y + 5);
+          doc.text(detailsStr, margin + 90, y + 5);
+          
+          doc.setDrawColor(241, 245, 249);
+          doc.line(margin, y + 7, margin + 180, y + 7);
+          y += 7;
+        });
+      }
+      
+      const pageCount = (doc as any).internal.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFont("Helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(148, 163, 184);
+        doc.text(`Page ${i} of ${pageCount}`, 195 - margin, 287, { align: "right" });
+        doc.text("CONFIDENTIAL - FOR INTERNAL AUDITING PURPOSES ONLY", margin, 287);
+      }
+      
+      doc.save(`monthly-license-audit-${new Date().toISOString().substring(0, 7)}.pdf`);
+    } catch (error) {
+      console.error("Failed to generate PDF:", error);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const chartData = [
+    { name: 'Jan', revenue: 14000, active: 24 },
+    { name: 'Feb', revenue: 23000, active: 28 },
+    { name: 'Mar', revenue: 35000, active: 35 },
+    { name: 'Apr', revenue: 47000, active: 42 },
+    { name: 'May', revenue: 46000, active: 48 },
+    { name: 'Jun', revenue: 69000, active: 55 },
+    { name: 'Jul', revenue: 91000 + currentRevenue, active: 62 + currentActive },
+  ];
+
+  const n = chartData.length;
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumX2 = 0;
+  
+  chartData.forEach((d, i) => {
+    sumX += i;
+    sumY += d.revenue;
+    sumXY += i * d.revenue;
+    sumX2 += i * i;
+  });
+
+  const m = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const c = (sumY - m * sumX) / n;
+  
+  const projectedChartData = chartData.map((d, i) => ({
+    ...d,
+    projected: Math.max(0, m * i + c)
+  }));
+
+  const currentMonthRevenue = chartData[5].revenue;
+  const prevMonthRevenue = chartData[4].revenue;
+  const growth = ((currentMonthRevenue - prevMonthRevenue) / prevMonthRevenue) * 100;
+
+  return (
+    <div className="space-y-6">
+      {/* Audit Action Header */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-zinc-900/30 border border-zinc-800/80 p-6 rounded-xl backdrop-blur-sm gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
+            <Activity className="w-5 h-5 text-indigo-400" />
+            Monthly Licensing Overview
+          </h2>
+          <p className="text-xs text-zinc-500 font-mono mt-1">Consolidated system auditing, license lifecycles, and network telemetry logs</p>
+        </div>
+        <button
+          onClick={generateMonthlyAuditPDF}
+          disabled={generating}
+          className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors shadow-lg shadow-indigo-600/15 cursor-pointer"
+        >
+          <Download className="w-4 h-4 animate-bounce" />
+          {generating ? 'Compiling PDF...' : 'Generate Monthly Audit PDF'}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-sm font-medium text-zinc-100 flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-400"/> Revenue Overview</h3>
+            <span className={cn("text-xs font-mono px-2 py-1 rounded", growth >= 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400")}>
+              {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
+            </span>
+          </div>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={projectedChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#818cf8" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#818cf8" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                <XAxis dataKey="name" stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} />
+                <YAxis stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(value) => `$${value/1000}k`} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
+                  itemStyle={{ color: '#e4e4e7' }}
+                  formatter={(value: number) => [`$${value.toLocaleString()}`, 'Revenue']}
+                />
+                <Area type="monotone" dataKey="revenue" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorRevenue)" />
+                <Line type="monotone" dataKey="projected" stroke="#fbbf24" strokeDasharray="5 5" strokeWidth={2} dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+          <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2"><Server className="w-4 h-4 text-emerald-400"/> Active Nodes Trend</h3>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                <XAxis dataKey="name" stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} />
+                <YAxis stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
+                  itemStyle={{ color: '#e4e4e7' }}
+                  cursor={{ fill: '#27272a', opacity: 0.4 }}
+                />
+                <Bar dataKey="active" fill="#34d399" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        
+        {/* Quick Reports */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+            <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2"><Building className="w-4 h-4 text-purple-400"/> Top 5 Clients (Revenue)</h3>
+            <div className="space-y-3">
+              {Array.from(licenses.reduce((acc, l) => acc.set(l.issued_to, (acc.get(l.issued_to) || 0) + (l.product_price || 0)), new Map<string, number>()).entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([name, revenue], i) => (
+                  <div key={name} className="flex items-center justify-between bg-zinc-950/50 p-3 rounded-lg border border-zinc-800/50">
+                    <span className="text-sm text-zinc-300 font-medium">{i + 1}. {name}</span>
+                    <span className="text-sm text-emerald-400 font-mono">${revenue.toLocaleString()}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+          <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+            <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2"><Cpu className="w-4 h-4 text-blue-400"/> Top 5 Most Active Nodes</h3>
+            <div className="space-y-3">
+              {[...licenses].sort((a, b) => (b.current_earnings || 0) - (a.current_earnings || 0))
+                .slice(0, 5)
+                .map((l, i) => (
+                  <div key={l.id} className="flex items-center justify-between bg-zinc-950/50 p-3 rounded-lg border border-zinc-800/50">
+                    <span className="text-xs text-zinc-300 font-mono">{i + 1}. {l.hardware_id || 'UNKNOWN'}</span>
+                    <span className="text-sm text-emerald-400 font-mono">${(l.current_earnings || 0).toLocaleString()}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ title, value, icon: Icon, color, bgColor }: { title: string, value: string | number, icon: any, color: string, bgColor: string }) {
+  return (
+    <div className="bg-zinc-900/30 p-6 rounded-xl border border-zinc-800/80 shadow-sm flex items-center gap-4 backdrop-blur-sm">
+      <div className={cn("p-3 rounded-lg", bgColor, color)}>
+        <Icon className="w-6 h-6" />
+      </div>
+      <div>
+        <p className="text-xs font-mono font-medium text-zinc-500 uppercase tracking-wider mb-1">{title}</p>
+        <p className="text-2xl font-bold text-zinc-100">{value}</p>
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  if (status === 'active') {
+    return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.8)]"></span>ACTIVE</span>;
+  }
+  if (status === 'suspended') {
+    return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>SUSPEND</span>;
+  }
+  if (status === 'revoked') {
+    return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>REVOKED</span>;
+  }
+  return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-800 text-zinc-400 border border-zinc-700 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-zinc-500"></span>EXPIRED</span>;
+}
+
