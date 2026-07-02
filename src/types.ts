@@ -47,6 +47,7 @@ export interface License {
   device_fingerprint: string | null;
   asset_classes: string; // JSON string of allowed classes: ['forex', 'crypto', 'stocks']
   restricted_accounts: string; // JSON string of allowed account IDs or API keys
+  billing_cycle: 'monthly' | 'yearly' | 'onetime';
 }
 
 export interface LicenseEvent {

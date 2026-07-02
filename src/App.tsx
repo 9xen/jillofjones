@@ -477,6 +477,7 @@ export default function App() {
       device_fingerprint: null,
       asset_classes: '["forex"]',
       restricted_accounts: '[]',
+      billing_cycle: (licenseData.billing_cycle as 'monthly' | 'yearly' | 'onetime') || 'onetime',
     };
     socketRef.current.emit('licenses:create', { license: newLicense, user: currentUser });
     setIsCreateModalOpen(false);
@@ -2194,7 +2195,19 @@ function NodesView({
                   return (
                     <tr key={l.id} className="hover:bg-zinc-800/10">
                       <td className="px-4 py-3">
-                        <div className="font-medium text-zinc-200 text-xs">{l.issued_to}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-zinc-200 text-xs">{l.issued_to}</span>
+                          {l.billing_cycle && (
+                            <span className={cn(
+                              "text-[8px] px-1.5 py-0.5 rounded font-mono uppercase font-bold tracking-wider",
+                              l.billing_cycle === 'monthly' ? "bg-cyan-500/10 border border-cyan-500/20 text-cyan-400" :
+                              l.billing_cycle === 'yearly' ? "bg-amber-500/10 border border-amber-500/20 text-amber-400" :
+                              "bg-indigo-500/10 border border-indigo-500/20 text-indigo-400"
+                            )}>
+                              {l.billing_cycle === 'onetime' ? 'lifetime' : l.billing_cycle}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-1 mt-0.5">
                           <Key className="w-3 h-3 text-indigo-400/80" />
                           {l.license_key ? `${l.license_key.substring(0, 12)}...` : 'N/A'}
@@ -3943,7 +3956,8 @@ function CreateLicenseModal({
   const [formData, setFormData] = useState({
     issued_to: '',
     software_name: '',
-    tier: ''
+    tier: '',
+    billing_cycle: 'onetime' as 'monthly' | 'yearly' | 'onetime'
   });
 
   useEffect(() => {
@@ -3951,7 +3965,8 @@ function CreateLicenseModal({
       setFormData({
         issued_to: clients[0]?.name || '',
         software_name: softwareProducts[0]?.name || 'QuantMaster HFT',
-        tier: licenseTiers[0]?.name || 'Professional'
+        tier: licenseTiers[0]?.name || 'Professional',
+        billing_cycle: 'onetime'
       });
     }
   }, [isOpen, clients, softwareProducts, licenseTiers]);
@@ -4031,6 +4046,18 @@ function CreateLicenseModal({
                   <option value="Institutional">Institutional (Unlimited Volume)</option>
                 </>
               )}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Billing Cycle</label>
+            <select 
+              value={formData.billing_cycle}
+              onChange={e => setFormData({...formData, billing_cycle: e.target.value as any})}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono"
+            >
+              <option value="onetime">One-time / Lifetime</option>
+              <option value="monthly">Monthly Subscription</option>
+              <option value="yearly">Yearly Subscription</option>
             </select>
           </div>
         </div>
@@ -4149,7 +4176,12 @@ function EditNodeConfigModal({
         <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
           <div>
             <h3 className="text-zinc-100 font-medium text-sm">Edit Active Node Config</h3>
-            <p className="text-[10px] font-mono text-zinc-500 mt-0.5">License: {license.issued_to} ({license.license_key.substring(0, 12)}...)</p>
+            <p className="text-[10px] font-mono text-zinc-500 mt-0.5">
+              License: {license.issued_to} ({license.license_key.substring(0, 12)}...)
+              {license.billing_cycle && (
+                <span className="text-indigo-400 capitalize ml-1">({license.billing_cycle === 'onetime' ? 'lifetime' : license.billing_cycle})</span>
+              )}
+            </p>
           </div>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
             <X className="w-5 h-5" />

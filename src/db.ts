@@ -44,7 +44,8 @@ db.exec(`
     last_active_ip TEXT,
     device_fingerprint TEXT,
     asset_classes TEXT,
-    restricted_accounts TEXT
+    restricted_accounts TEXT,
+    billing_cycle TEXT DEFAULT 'onetime'
   );
 
   CREATE TABLE IF NOT EXISTS license_events (
@@ -137,13 +138,13 @@ db.exec(`
     ('user_03', 'Compliance Auditor', 'auditor@quantfund.net', '$2a$10$zR8WfJb.fB6iG7KjP9q1u.7x6f5g4h3j2k1l0m9n8b7v6c5x4z3y2', 'Auditor', '2026-02-01T00:00:00Z');
 
   -- Seed Default Licenses
-  INSERT OR IGNORE INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts)
+  INSERT OR IGNORE INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle)
   VALUES 
-    ('lic_01', 'HFT Terminal Alpha', 'Institutional', 'sk_live_HFT_Alpha_001', 'active', 'Polaris Hedge Fund', 'HWID-POLARIS-9832', '192.168.1.100,203.0.113.5', '["HFT_CORE", "MAX_LEVERAGE_100x"]', 10000000, 50000, 1500000, 18000000, 1205, 34910, 412095, '2026-01-15T08:00:00Z', '2027-01-15T08:00:00Z', 12500, 3849.20, 10.5, 75.3, 310.2, '203.0.113.5', 'FP-POLARIS-X', '["forex", "stocks"]', '["ACC-12345", "ACC-67890"]'),
-    ('lic_02', 'Arbitrage Bot v4', 'Professional', 'sk_live_ArbBot_002', 'active', 'Aether Capital', 'HWID-AETHER-2349', '198.51.100.22', '["ARB_STANDARD", "MULTI_EXCHANGE"]', 2000000, 25000, 750000, 9000000, 485, 12904, 150931, '2026-03-10T10:30:00Z', '2026-09-10T10:30:00Z', 4500, 129.50, 2.1, 14.8, 55.4, '198.51.100.22', 'FP-AETHER-4', '["crypto"]', '["BINANCE-API-KEY-HASH-001"]'),
-    ('lic_03', 'Trend Follower Core', 'Starter', 'sk_live_Trend_003', 'suspended', 'Nova Alpha', 'HWID-NOVA-8822', '203.0.113.99', '["TREND_INDICATORS"]', 500000, 10000, 300000, 3600000, 0, 0, 0, '2026-05-01T14:15:00Z', '2026-11-01T14:15:00Z', 1200, 0.00, 0, 0, 0, '203.0.113.99', 'FP-NOVA-Z', '["forex"]', '[]'),
-    ('lic_04', 'HFT Terminal Alpha', 'Institutional', 'sk_live_HFT_Alpha_004', 'active', 'BlackWood Trust', 'HWID-BLACKWOOD-1111', '192.0.2.1', '["HFT_CORE"]', 5000000, 30000, 900000, 10800000, 29014, 895310, 10795320, '2026-02-20T09:00:00Z', '2027-02-20T09:00:00Z', 9500, 5521.80, 24.5, 145.2, 590.5, '192.0.2.1', 'FP-BLACKWOOD-1', '["stocks"]', '["NY-TICKER-FEED-001"]'),
-    ('lic_05', 'Market Maker Pro', 'Professional', 'sk_live_MMPro_005', 'active', 'Orion Capital', 'HWID-ORION-5555', '198.51.100.5', '["MARKET_MAKER_CORE", "LOW_LATENCY_API"]', 4000000, 40000, 1200000, 14400000, 895, 25612, 309485, '2026-04-05T11:00:00Z', '2026-10-05T11:00:00Z', 6000, 3200.00, 15.2, 98.4, 380.1, '198.51.100.5', 'FP-ORION-A', '["crypto", "forex"]', '["BYBIT-001", "MT5-998877"]');
+    ('lic_01', 'HFT Terminal Alpha', 'Institutional', 'sk_live_HFT_Alpha_001', 'active', 'Polaris Hedge Fund', 'HWID-POLARIS-9832', '192.168.1.100,203.0.113.5', '["HFT_CORE", "MAX_LEVERAGE_100x"]', 10000000, 50000, 1500000, 18000000, 1205, 34910, 412095, '2026-01-15T08:00:00Z', '2027-01-15T08:00:00Z', 12500, 3849.20, 10.5, 75.3, 310.2, '203.0.113.5', 'FP-POLARIS-X', '["forex", "stocks"]', '["ACC-12345", "ACC-67890"]', 'yearly'),
+    ('lic_02', 'Arbitrage Bot v4', 'Professional', 'sk_live_ArbBot_002', 'active', 'Aether Capital', 'HWID-AETHER-2349', '198.51.100.22', '["ARB_STANDARD", "MULTI_EXCHANGE"]', 2000000, 25000, 750000, 9000000, 485, 12904, 150931, '2026-03-10T10:30:00Z', '2026-09-10T10:30:00Z', 4500, 129.50, 2.1, 14.8, 55.4, '198.51.100.22', 'FP-AETHER-4', '["crypto"]', '["BINANCE-API-KEY-HASH-001"]', 'monthly'),
+    ('lic_03', 'Trend Follower Core', 'Starter', 'sk_live_Trend_003', 'suspended', 'Nova Alpha', 'HWID-NOVA-8822', '203.0.113.99', '["TREND_INDICATORS"]', 500000, 10000, 300000, 3600000, 0, 0, 0, '2026-05-01T14:15:00Z', '2026-11-01T14:15:00Z', 1200, 0.00, 0, 0, 0, '203.0.113.99', 'FP-NOVA-Z', '["forex"]', '[]', 'onetime'),
+    ('lic_04', 'HFT Terminal Alpha', 'Institutional', 'sk_live_HFT_Alpha_004', 'active', 'BlackWood Trust', 'HWID-BLACKWOOD-1111', '192.0.2.1', '["HFT_CORE"]', 5000000, 30000, 900000, 10800000, 29014, 895310, 10795320, '2026-02-20T09:00:00Z', '2027-02-20T09:00:00Z', 9500, 5521.80, 24.5, 145.2, 590.5, '192.0.2.1', 'FP-BLACKWOOD-1', '["stocks"]', '["NY-TICKER-FEED-001"]', 'yearly'),
+    ('lic_05', 'Market Maker Pro', 'Professional', 'sk_live_MMPro_005', 'active', 'Orion Capital', 'HWID-ORION-5555', '198.51.100.5', '["MARKET_MAKER_CORE", "LOW_LATENCY_API"]', 4000000, 40000, 1200000, 14400000, 895, 25612, 309485, '2026-04-05T11:00:00Z', '2026-10-05T11:00:00Z', 6000, 3200.00, 15.2, 98.4, 380.1, '198.51.100.5', 'FP-ORION-A', '["crypto", "forex"]', '["BYBIT-001", "MT5-998877"]', 'monthly');
 
   -- Seed Default Verification Events
   INSERT OR IGNORE INTO license_events (id, license_id, event_type, event_data, timestamp)
@@ -204,8 +205,8 @@ export function getAllLicenses(): License[] {
 
 export function createLicense(license: License): License {
   const stmt = db.prepare(`
-    INSERT INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts)
-    VALUES (@id, @software_name, @tier, @license_key, @status, @issued_to, @hardware_id, @ip_whitelist, @features, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @api_calls_count_daily, @api_calls_count_monthly, @api_calls_count_yearly, @created_at, @expires_at, @product_price, @current_earnings, @daily_earnings, @weekly_earnings, @monthly_earnings, @last_active_ip, @device_fingerprint, @asset_classes, @restricted_accounts)
+    INSERT INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle)
+    VALUES (@id, @software_name, @tier, @license_key, @status, @issued_to, @hardware_id, @ip_whitelist, @features, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @api_calls_count_daily, @api_calls_count_monthly, @api_calls_count_yearly, @created_at, @expires_at, @product_price, @current_earnings, @daily_earnings, @weekly_earnings, @monthly_earnings, @last_active_ip, @device_fingerprint, @asset_classes, @restricted_accounts, @billing_cycle)
   `);
   stmt.run(license);
   return license;
