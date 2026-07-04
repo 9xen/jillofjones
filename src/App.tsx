@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { License, LicenseEvent, Fund, Client, SoftwareProduct, LicenseTier, AuditSchedule, AppUser, AppRole, AuditLog } from './types';
-import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive } from 'lucide-react';
+import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronUp, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
@@ -26,6 +26,9 @@ export default function App() {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [dateRange, setDateRange] = useState({ start: '', end: '', type: 'created_at' as 'created_at' | 'expires_at' });
   const [selectedLicenses, setSelectedLicenses] = useState<Set<string>>(new Set());
+
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
+
   const [clients, setClients] = useState<Client[]>([]);
   const [softwareProducts, setSoftwareProducts] = useState<SoftwareProduct[]>([]);
   const [licenseTiers, setLicenseTiers] = useState<LicenseTier[]>([]);
@@ -369,6 +372,7 @@ export default function App() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState<{message: string, type: 'success'|'error', onUndo?: () => void} | null>(null);
+  const [editingMainLicense, setEditingMainLicense] = useState<License | null>(null);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success', onUndo?: () => void) => {
     setToast({ message, type, onUndo });
@@ -381,9 +385,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/license/${license.id}/events`);
       const data = await res.json();
-      setEvents(data);
+      setEvents(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error(e);
+      setEvents([]);
     }
   };
 
@@ -603,6 +608,14 @@ export default function App() {
   const handleCreateLicense = (licenseData: Partial<License>) => {
     if (!socketRef.current) return;
     
+    if (editingMainLicense) {
+      socketRef.current.emit("licenses:update_details", { id: editingMainLicense.id, updates: licenseData, user: currentUser });
+      showToast('License details updated', 'success');
+      setEditingMainLicense(null);
+      return;
+    }
+
+    
     // Resolve dynamic price and limit config
     const prod = softwareProducts.find(p => p.name === licenseData.software_name);
     const tier = licenseTiers.find(t => t.name === licenseData.tier);
@@ -669,6 +682,25 @@ export default function App() {
     socketRef.current.emit('clients:create', { client: newClient, user: currentUser });
   };
 
+
+  const editClient = (id: string, updates: Partial<Client>) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('clients:update', { id, updates, user: currentUser });
+    showToast('Client updated', 'success');
+  };
+
+  const editSoftwareProduct = (id: string, updates: Partial<SoftwareProduct>) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('software_products:update', { id, updates });
+    showToast('Product updated', 'success');
+  };
+
+  const editLicenseTier = (id: string, updates: Partial<LicenseTier>) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('license_tiers:update', { id, updates });
+    showToast('Tier updated', 'success');
+  };
+
   const removeClient = (id: string) => {
     if (!socketRef.current) return;
     socketRef.current.emit('clients:delete', { id, user: currentUser });
@@ -713,6 +745,7 @@ export default function App() {
     return diffDays <= 30 && diffDays >= 0;
   };
 
+
   const filteredLicenses = licenses.filter(l => {
     const matchesSearch = l.issued_to.toLowerCase().includes(search.toLowerCase()) || 
                           l.license_key.toLowerCase().includes(search.toLowerCase()) ||
@@ -726,7 +759,35 @@ export default function App() {
                         (!dateRange.end || dateValue <= new Date(dateRange.end));
     
     return matchesSearch && matchesStatus && matchesDate;
+  }).sort((a, b) => {
+    if (!sortConfig) return 0;
+    const { key, direction } = sortConfig;
+    let aValue = a[key as keyof License] ?? '';
+    let bValue = b[key as keyof License] ?? '';
+
+    // special handling for risk score
+    if (key === 'risk_score') {
+      aValue = duckDBRiskScores[a.id]?.risk_score || calculateRiskScore(a);
+      bValue = duckDBRiskScores[b.id]?.risk_score || calculateRiskScore(b);
+    }
+    
+    if (aValue < bValue) {
+      return direction === 'asc' ? -1 : 1;
+    }
+    if (aValue > bValue) {
+      return direction === 'asc' ? 1 : -1;
+    }
+    return 0;
   });
+
+  const handleSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
 
   const handleUpdateLicenseConfig = (id: string, config: any) => {
     if (!socketRef.current) return;
@@ -1040,12 +1101,49 @@ export default function App() {
                   <th className="px-6 py-4">
                     <input type="checkbox" checked={selectedLicenses.size === filteredLicenses.length && filteredLicenses.length > 0} onChange={toggleSelectAll} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
                   </th>
-                  {visibleColumns.license && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">License / Tier</th>}
-                  {visibleColumns.software && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Software / Fund</th>}
+                  
+                  {visibleColumns.license && (
+                    <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider cursor-pointer hover:text-zinc-100" onClick={() => handleSort('license_key')}>
+                      License / Tier
+                      {sortConfig?.key === 'license_key' && (sortConfig.direction === 'asc' ? <ChevronUp className="w-3 h-3 inline ml-1" /> : <ChevronDown className="w-3 h-3 inline ml-1" />)}
+                    </th>
+                  )}
+
+                  
+                  {visibleColumns.software && (
+                    <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider cursor-pointer hover:text-zinc-100" onClick={() => handleSort('software_name')}>
+                      Software / Fund
+                      {sortConfig?.key === 'software_name' && (sortConfig.direction === 'asc' ? <ChevronUp className="w-3 h-3 inline ml-1" /> : <ChevronDown className="w-3 h-3 inline ml-1" />)}
+                    </th>
+                  )}
+
+                  
                   {visibleColumns.security && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Security / Limits</th>}
-                  {visibleColumns.risk && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">License Health</th>}
-                  {visibleColumns.earnings && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Client Earnings</th>}
-                  {visibleColumns.status && <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider">Status / Dates</th>}
+
+                  
+                  {visibleColumns.risk && (
+                    <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider cursor-pointer hover:text-zinc-100" onClick={() => handleSort('risk_score')}>
+                      License Health
+                      {sortConfig?.key === 'risk_score' && (sortConfig.direction === 'asc' ? <ChevronUp className="w-3 h-3 inline ml-1" /> : <ChevronDown className="w-3 h-3 inline ml-1" />)}
+                    </th>
+                  )}
+
+                  
+                  {visibleColumns.earnings && (
+                    <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider cursor-pointer hover:text-zinc-100" onClick={() => handleSort('current_earnings')}>
+                      Client Earnings
+                      {sortConfig?.key === 'current_earnings' && (sortConfig.direction === 'asc' ? <ChevronUp className="w-3 h-3 inline ml-1" /> : <ChevronDown className="w-3 h-3 inline ml-1" />)}
+                    </th>
+                  )}
+
+                  
+                  {visibleColumns.status && (
+                    <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider cursor-pointer hover:text-zinc-100" onClick={() => handleSort('expires_at')}>
+                      Status / Dates
+                      {sortConfig?.key === 'expires_at' && (sortConfig.direction === 'asc' ? <ChevronUp className="w-3 h-3 inline ml-1" /> : <ChevronDown className="w-3 h-3 inline ml-1" />)}
+                    </th>
+                  )}
+
                   <th className="px-6 py-4 font-mono text-[10px] uppercase tracking-wider text-right flex items-center justify-end gap-2">
                     Actions
                     <div className="relative group">
@@ -1293,6 +1391,14 @@ export default function App() {
                                   </button>
                                 )}
                                 <div className="w-px h-4 bg-zinc-800 mx-1"></div>
+
+                                <button onClick={(e) => { 
+                                  e.stopPropagation(); 
+                                  setEditingMainLicense(license);
+                                  setIsCreateModalOpen(true);
+                                }} className="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors border border-transparent hover:border-indigo-500/20" title="Edit details">
+                                  <SlidersHorizontal className="w-4 h-4" />
+                                </button>
                                 <button onClick={(e) => { e.stopPropagation(); deleteLicense(license.id); }} className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors border border-transparent hover:border-rose-500/20" title="Delete">
                                   <Trash2 className="w-4 h-4" />
                                 </button>
@@ -1407,6 +1513,7 @@ export default function App() {
             clients={clients} 
             addClient={addClient} 
             deleteClient={removeClient} 
+            editClient={editClient}
             licenses={licenses} 
             currentUser={currentUser}
             showToast={showToast} 
@@ -1417,6 +1524,7 @@ export default function App() {
             products={softwareProducts} 
             addProduct={addSoftwareProduct} 
             deleteProduct={removeSoftwareProduct} 
+            editProduct={editSoftwareProduct}
             licenses={licenses} 
             currentUser={currentUser}
             showToast={showToast} 
@@ -1427,6 +1535,7 @@ export default function App() {
             tiers={licenseTiers} 
             addTier={addLicenseTier} 
             deleteTier={removeLicenseTier} 
+            editTier={editLicenseTier}
             licenses={licenses} 
             currentUser={currentUser}
             showToast={showToast} 
@@ -1580,7 +1689,8 @@ export default function App() {
       {/* Create License Modal */}
       <CreateLicenseModal 
         isOpen={isCreateModalOpen} 
-        onClose={() => setIsCreateModalOpen(false)} 
+        onClose={() => { setIsCreateModalOpen(false); setEditingMainLicense(null); }} 
+        editingLicense={editingMainLicense}
         onCreate={handleCreateLicense} 
         clients={clients}
         softwareProducts={softwareProducts}
@@ -1840,6 +1950,7 @@ function FundsView({
   clients, 
   addClient, 
   deleteClient, 
+  editClient,
   licenses, 
   currentUser,
   showToast 
@@ -1847,6 +1958,7 @@ function FundsView({
   clients: Client[], 
   addClient: (c: Omit<Client, 'id'>) => void, 
   deleteClient: (id: string) => void, 
+  editClient: (id: string, updates: Partial<Client>) => void,
   licenses: License[], 
   currentUser: AppUser | null,
   showToast: (msg: string, type: 'success'|'error') => void 
@@ -1860,6 +1972,7 @@ function FundsView({
     extra_info: '' 
   });
   
+  const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [extraFields, setExtraFields] = useState<Array<{ key: string, value: string }>>([
     { key: 'AUM Tier', value: 'Over $50M' },
     { key: 'Jurisdiction', value: 'Cayman Islands' }
@@ -2035,6 +2148,31 @@ function FundsView({
                     <td className="px-6 py-4 text-zinc-300 font-mono text-xs">{stats.count} nodes</td>
                     <td className="px-6 py-4 text-emerald-400 font-mono text-xs">${stats.value.toLocaleString()}/mo</td>
                     <td className="px-6 py-4 text-right">
+
+                      <button 
+                        onClick={() => {
+                          setEditingClient(cli);
+                          setFormData({
+                            name: cli.name,
+                            email: cli.email,
+                            mobile: cli.mobile,
+                            address: cli.address || '',
+                            extra_info: ''
+                          });
+                          if (cli.extra_info) {
+                            try {
+                              const parsed = JSON.parse(cli.extra_info);
+                              setExtraFields(Object.entries(parsed).map(([key, value]) => ({ key, value: String(value) })));
+                            } catch(e) {}
+                          } else {
+                            setExtraFields([]);
+                          }
+                          setIsModalOpen(true);
+                        }}
+                        className="text-zinc-500 hover:text-indigo-400 text-xs font-medium transition-colors mr-3"
+                      >
+                        Edit
+                      </button>
                       <button 
                         onClick={() => deleteClient(cli.id)} 
                         className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors"
@@ -2972,6 +3110,39 @@ function SettingsView({
   const [isRotating, setIsRotating] = useState(false);
   const [isSavingLatency, setIsSavingLatency] = useState(false);
 
+  const [autoPauseEnabled, setAutoPauseEnabled] = useState(false);
+  const [isSavingAutoPause, setIsSavingAutoPause] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/settings/auto-pause')
+      .then(res => res.json())
+      .then(data => setAutoPauseEnabled(data.enabled))
+      .catch(err => console.error('Failed to fetch auto-pause setting', err));
+  }, []);
+
+  const handleToggleAutoPause = async () => {
+    setIsSavingAutoPause(true);
+    const newValue = !autoPauseEnabled;
+    try {
+      const res = await fetch('/api/settings/auto-pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newValue, user: currentUser })
+      });
+      if (res.ok) {
+        setAutoPauseEnabled(newValue);
+        showToast(`Auto-Pause ${newValue ? 'enabled' : 'disabled'} successfully`, 'success');
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch (err) {
+      showToast('Error saving auto-pause setting', 'error');
+    } finally {
+      setIsSavingAutoPause(false);
+    }
+  };
+
+
   const handleSaveLatencyThreshold = async () => {
     setIsSavingLatency(true);
     try {
@@ -3192,7 +3363,8 @@ int OnInit() {
     try {
       // 1. Fetch events from server
       const resEvents = await fetch('/api/events');
-      const events: LicenseEvent[] = await resEvents.json();
+      const eventsData = await resEvents.json();
+      const events: LicenseEvent[] = Array.isArray(eventsData) ? eventsData : [];
 
       // 2. Compile PDF via client-side jsPDF
       const doc = new jsPDF();
@@ -3714,6 +3886,26 @@ int OnInit() {
           >
             {isSavingLatency ? 'Saving...' : 'Update Latency Threshold'}
           </button>
+
+          <div className="pt-4 border-t border-zinc-800/50 mt-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="block text-sm font-medium text-zinc-200 mb-1">
+                  Risk-Based Auto-Pause
+                </label>
+                <span className="text-[10px] text-zinc-500 font-mono block max-w-xl">
+                  Automatically triggers an instant license suspension if the calculated DuckDB Risk Score exceeds 90.
+                </span>
+              </div>
+              <button
+                onClick={handleToggleAutoPause}
+                disabled={isSavingAutoPause}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoPauseEnabled ? 'bg-indigo-500' : 'bg-zinc-700'} ${isSavingAutoPause ? 'opacity-50' : ''}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${autoPauseEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -3967,6 +4159,7 @@ function SoftwareProductsView({
   products, 
   addProduct, 
   deleteProduct, 
+  editProduct,
   licenses, 
   currentUser,
   showToast 
@@ -3974,16 +4167,26 @@ function SoftwareProductsView({
   products: SoftwareProduct[], 
   addProduct: (p: Omit<SoftwareProduct, 'id'>) => void, 
   deleteProduct: (id: string) => void, 
+  editProduct: (id: string, updates: Partial<SoftwareProduct>) => void,
   licenses: License[], 
   currentUser: AppUser | null,
   showToast: (msg: string, type: 'success'|'error') => void 
 }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<SoftwareProduct | null>(null);
   const [formData, setFormData] = useState({ name: '', description: '', base_price: 5000 });
 
   const handleSubmit = () => {
     if (!formData.name) return;
-    addProduct(formData);
+
+    const payload = { ...formData };
+    if (editingProduct) {
+      editProduct(editingProduct.id, payload);
+    } else {
+      addProduct(payload);
+    }
+    setEditingProduct(null);
+
     setFormData({ name: '', description: '', base_price: 5000 });
     setIsModalOpen(false);
     showToast('Software product successfully added', 'success');
@@ -4064,6 +4267,21 @@ function SoftwareProductsView({
                     <td className="px-6 py-4 text-emerald-400 font-mono text-xs">${prod.base_price.toLocaleString()}/mo</td>
                     <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{count} active</td>
                     <td className="px-6 py-4 text-right">
+
+                      <button 
+                        onClick={() => {
+                          setEditingProduct(prod);
+                          setFormData({
+                            name: prod.name,
+                            description: prod.description || '',
+                                                        base_price: prod.base_price
+                          });
+                          setIsModalOpen(true);
+                        }}
+                        className="text-zinc-500 hover:text-indigo-400 text-xs font-medium transition-colors mr-3"
+                      >
+                        Edit
+                      </button>
                       <button 
                         onClick={() => deleteProduct(prod.id)} 
                         className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors"
@@ -4094,6 +4312,7 @@ function LicenseTiersView({
   tiers, 
   addTier, 
   deleteTier, 
+  editTier,
   licenses, 
   currentUser,
   showToast 
@@ -4101,16 +4320,26 @@ function LicenseTiersView({
   tiers: LicenseTier[], 
   addTier: (t: Omit<LicenseTier, 'id'>) => void, 
   deleteTier: (id: string) => void, 
+  editTier: (id: string, updates: Partial<LicenseTier>) => void,
   licenses: License[], 
   currentUser: AppUser | null,
   showToast: (msg: string, type: 'success'|'error') => void 
 }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingTier, setEditingTier] = useState<LicenseTier | null>(null);
   const [formData, setFormData] = useState({ name: '', max_volume_usd: 10000000, api_calls_limit: 10000, description: '' });
 
   const handleSubmit = () => {
     if (!formData.name) return;
-    addTier(formData);
+
+    const payload = { ...formData };
+    if (editingTier) {
+      editTier(editingTier.id, payload);
+    } else {
+      addTier(payload);
+    }
+    setEditingTier(null);
+
     setFormData({ name: '', max_volume_usd: 10000000, api_calls_limit: 10000, description: '' });
     setIsModalOpen(false);
     showToast('License tier successfully added', 'success');
@@ -4201,6 +4430,24 @@ function LicenseTiersView({
                     </td>
                     <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{count} active</td>
                     <td className="px-6 py-4 text-right">
+
+                      <button 
+                        onClick={() => {
+                          setEditingTier(t);
+                          setFormData({
+                            name: t.name,
+                            description: t.description || '',
+                            max_volume_usd: t.max_volume_usd,
+                            api_calls_limit: t.api_calls_limit,
+                            api_calls_limit_monthly: t.api_calls_limit_monthly || 300000,
+                            api_calls_limit_yearly: t.api_calls_limit_yearly || 3600000
+                          });
+                          setIsModalOpen(true);
+                        }}
+                        className="text-zinc-500 hover:text-indigo-400 text-xs font-medium transition-colors mr-3"
+                      >
+                        Edit
+                      </button>
                       <button 
                         onClick={() => deleteTier(t.id)} 
                         className="text-zinc-500 hover:text-rose-400 text-xs font-medium transition-colors"
@@ -4233,14 +4480,16 @@ function CreateLicenseModal({
   onCreate,
   clients,
   softwareProducts,
-  licenseTiers
+  licenseTiers,
+  editingLicense
 }: { 
   isOpen: boolean, 
   onClose: () => void, 
   onCreate: (data: Partial<License>) => void,
   clients: Client[],
   softwareProducts: SoftwareProduct[],
-  licenseTiers: LicenseTier[]
+  licenseTiers: LicenseTier[],
+  editingLicense?: License | null
 }) {
   const [formData, setFormData] = useState({
     issued_to: '',
@@ -4266,7 +4515,7 @@ function CreateLicenseModal({
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md overflow-hidden shadow-2xl">
         <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
-          <h3 className="text-zinc-100 font-medium text-sm">Provision New License</h3>
+          <h3 className="text-zinc-100 font-medium text-sm">{editingLicense ? 'Edit License' : 'Provision New License'}</h3>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
             <X className="w-5 h-5" />
           </button>
@@ -4638,7 +4887,8 @@ function DashboardView({ licenses, riskScores }: { licenses: License[], riskScor
     setGenerating(true);
     try {
       const res = await fetch('/api/events');
-      const events: LicenseEvent[] = await res.json();
+      const eventsData = await res.json();
+      const events: LicenseEvent[] = Array.isArray(eventsData) ? eventsData : [];
       
       const doc = new jsPDF();
       

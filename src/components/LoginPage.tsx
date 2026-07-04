@@ -159,6 +159,23 @@ export function LoginPage({ onLogin, showToast }: LoginPageProps) {
                 <p className="text-zinc-500 text-sm mt-2">Enterprise Licensing & Audit Management</p>
               </div>
 
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 mb-4 text-xs">
+                <p className="text-zinc-400 font-semibold mb-1">Demo Credentials:</p>
+                <div className="flex justify-between items-center mt-1">
+                  <span className="text-zinc-300">admin@nonaxen.infra</span>
+                  <span className="text-zinc-500">admin123</span>
+                </div>
+                <div className="flex justify-between items-center mt-1">
+                  <span className="text-zinc-300">manager@nonaxen.infra</span>
+                  <span className="text-zinc-500">manager123</span>
+                </div>
+                <div className="flex justify-between items-center mt-1">
+                  <span className="text-zinc-300">auditor@nonaxen.infra</span>
+                  <span className="text-zinc-500">auditor123</span>
+                </div>
+              </div>
+
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-zinc-400 ml-1">Email Address</label>

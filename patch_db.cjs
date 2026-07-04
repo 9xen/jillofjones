@@ -1,25 +1,61 @@
 const fs = require('fs');
 let code = fs.readFileSync('src/db.ts', 'utf8');
+
 code = code.replace(
-  'last_login TEXT\n  );',
-  'last_login TEXT,\n    notification_preferences TEXT DEFAULT \'{"expirations":true,"renewals":true,"assignments":true}\'\n  );'
-);
-if (!code.includes('notification_preferences TEXT DEFAULT')) {
-  console.log("Failed to patch CREATE TABLE users");
+  "export function deleteClient(id: string): void {",
+  `export function updateClient(id: string, updates: Partial<Client>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at') {
+      fields.push(\`\${key} = ?\`);
+      values.push(key === 'extra_info' && typeof value !== 'string' ? JSON.stringify(value) : value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(\`UPDATE clients SET \${fields.join(', ')} WHERE id = ?\`).run(...values);
 }
 
-let alterStmt = `
-  try {
-    db.exec("ALTER TABLE users ADD COLUMN notification_preferences TEXT DEFAULT '{\\"expirations\\":true,\\"renewals\\":true,\\"assignments\\":true}'");
-  } catch (e) {
-    // Column might already exist
-  }
-`;
-code = code.replace(
-  '// Create default user if none exist',
-  alterStmt + '\n\n  // Create default user if none exist'
+export function deleteClient(id: string): void {`
 );
 
-// We need to also update getAllUsers and getUserByEmail to return this column. Wait, they probably just SELECT * so they'll get it automatically.
-// Same for createUser?
+code = code.replace(
+  "export function deleteSoftwareProduct(id: string): void {",
+  `export function updateSoftwareProduct(id: string, updates: Partial<SoftwareProduct>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at') {
+      fields.push(\`\${key} = ?\`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(\`UPDATE software_products SET \${fields.join(', ')} WHERE id = ?\`).run(...values);
+}
+
+export function deleteSoftwareProduct(id: string): void {`
+);
+
+code = code.replace(
+  "export function deleteLicenseTier(id: string): void {",
+  `export function updateLicenseTier(id: string, updates: Partial<LicenseTier>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at') {
+      fields.push(\`\${key} = ?\`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(\`UPDATE license_tiers SET \${fields.join(', ')} WHERE id = ?\`).run(...values);
+}
+
+export function deleteLicenseTier(id: string): void {`
+);
+
 fs.writeFileSync('src/db.ts', code);

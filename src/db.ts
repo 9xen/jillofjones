@@ -304,6 +304,20 @@ export function updateLicenseLastActive(id: string, last_ip: string): void {
   stmt.run({ id, last_ip });
 }
 
+export function updateLicenseDetails(id: string, updates: Partial<License>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at' && key !== 'license_key') {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE licenses SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
 export function deleteLicense(id: string): void {
   const stmt = db.prepare('DELETE FROM licenses WHERE id = @id');
   stmt.run({ id });
@@ -379,6 +393,20 @@ export function createClient(client: Client): Client {
   return client;
 }
 
+export function updateClient(id: string, updates: Partial<Client>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at') {
+      fields.push(`${key} = ?`);
+      values.push(key === 'extra_info' && typeof value !== 'string' ? JSON.stringify(value) : value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE clients SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
 export function deleteClient(id: string): void {
   const stmt = db.prepare('DELETE FROM clients WHERE id = ?');
   stmt.run(id);
@@ -398,6 +426,20 @@ export function createSoftwareProduct(product: SoftwareProduct): SoftwareProduct
   return product;
 }
 
+export function updateSoftwareProduct(id: string, updates: Partial<SoftwareProduct>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at') {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE software_products SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
 export function deleteSoftwareProduct(id: string): void {
   const stmt = db.prepare('DELETE FROM software_products WHERE id = ?');
   stmt.run(id);
@@ -415,6 +457,20 @@ export function createLicenseTier(tier: LicenseTier): LicenseTier {
   `);
   stmt.run(tier);
   return tier;
+}
+
+export function updateLicenseTier(id: string, updates: Partial<LicenseTier>): void {
+  const fields = [];
+  const values = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (key !== 'id' && key !== 'created_at') {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE license_tiers SET ${fields.join(', ')} WHERE id = ?`).run(...values);
 }
 
 export function deleteLicenseTier(id: string): void {

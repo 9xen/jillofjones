@@ -7,11 +7,11 @@ import helmet from "helmet";
 import cors from "cors";
 import compression from "compression";
 import {
-  getAllLicenses, createLicense, updateLicenseStatus, deleteLicense, updateLicenseEarnings, getLicenseByKey, logLicenseEvent,
+  getAllLicenses, createLicense, updateLicenseStatus, deleteLicense, updateLicenseDetails, updateLicenseEarnings, getLicenseByKey, logLicenseEvent,
   updateLicenseConfig, incrementApiCalls, batchUpdateLicenses,
-  getAllClients, createClient, deleteClient,
-  getAllSoftwareProducts, createSoftwareProduct, deleteSoftwareProduct,
-  getAllLicenseTiers, createLicenseTier, deleteLicenseTier,
+  getAllClients, createClient, deleteClient, updateClient,
+  getAllSoftwareProducts, createSoftwareProduct, deleteSoftwareProduct, updateSoftwareProduct,
+  getAllLicenseTiers, createLicenseTier, deleteLicenseTier, updateLicenseTier,
   getAuditSchedule, updateAuditSchedule, logAuditRun,
   getAllUsers, createUser, deleteUser, updateUserRole, getUserByEmail,
   getAllAuditLogs, createAuditLog, extendLicenseExpiry,
@@ -20,7 +20,7 @@ import {
   getSystemConfig, setSystemConfig,
   getUserWithPasswordByEmail, updateLastLogin,
   saveRecoveryCode, getRecoveryCode, deleteRecoveryCode, updateUserPassword,
-  checkSQLiteHealth
+  checkSQLiteHealth, getLicenseEvents, getAllEvents
 } from "./src/db";
 import { updateUserPreferences } from "./src/db";
 import { License, AppUser, AuditLog } from "./src/types";
@@ -508,6 +508,16 @@ async function notifyUsers(event: string, subject: string, text: string) {
       }
     });
 
+    socket.on("licenses:update_details", ({ id, updates, user }: { id: string, updates: any, user: AppUser }) => {
+      try {
+        updateLicenseDetails(id, updates);
+        io.emit("licenses:updated", { id, ...updates });
+        logAction(user, 'update', 'license', id, `Updated license profile details`);
+      } catch (err) {
+        console.error("Error updating license details:", err);
+      }
+    });
+
     socket.on("licenses:delete", ({ id, user }: { id: string, user: AppUser }) => {
       try {
         deleteLicense(id);
@@ -630,6 +640,16 @@ async function notifyUsers(event: string, subject: string, text: string) {
       }
     });
 
+    socket.on("clients:update", ({ id, updates, user }: { id: string, updates: any, user: AppUser }) => {
+      try {
+        updateClient(id, updates);
+        io.emit("clients:updated", { id, updates });
+        logAction(user, 'update', 'client', id, `Updated client profile`);
+      } catch (err) {
+        console.error("Error updating client:", err);
+      }
+    });
+
     socket.on("clients:delete", ({ id, user }: { id: string, user: AppUser }) => {
       try {
         deleteClient(id);
@@ -649,6 +669,15 @@ async function notifyUsers(event: string, subject: string, text: string) {
       }
     });
 
+    socket.on("software_products:update", ({ id, updates }: { id: string, updates: any }) => {
+      try {
+        updateSoftwareProduct(id, updates);
+        io.emit("software_products:updated", { id, updates });
+      } catch (err) {
+        console.error("Error updating software product:", err);
+      }
+    });
+
     socket.on("software_products:delete", (id: string) => {
       try {
         deleteSoftwareProduct(id);
@@ -664,6 +693,15 @@ async function notifyUsers(event: string, subject: string, text: string) {
         io.emit("license_tiers:created", created);
       } catch (err) {
         console.error("Error creating license tier:", err);
+      }
+    });
+
+    socket.on("license_tiers:update", ({ id, updates }: { id: string, updates: any }) => {
+      try {
+        updateLicenseTier(id, updates);
+        io.emit("license_tiers:updated", { id, updates });
+      } catch (err) {
+        console.error("Error updating license tier:", err);
       }
     });
 
@@ -689,8 +727,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
       try {
         
         updateUserRole(id, role);
-        const log = createAuditLog('system', 'System', 'update_role', 'user', id, `Updated user role to ${role}`);
-        io.emit('audit:new', log);
+        logAction(null, 'update_role', 'user', id, `Updated user role to ${role}`);
         io.emit("users:role_updated", { id, role });
 
       } catch (err) {
@@ -1021,6 +1058,62 @@ async function notifyUsers(event: string, subject: string, text: string) {
     }
   });
 
+
+  app.get("/api/settings/auto-pause", (req, res) => {
+    const enabled = getSystemConfig("auto_pause_enabled");
+    res.json({ enabled: enabled === "true" });
+  });
+
+  app.post("/api/settings/auto-pause", (req, res) => {
+    try {
+      const { enabled, user } = req.body;
+      setSystemConfig("auto_pause_enabled", enabled ? "true" : "false");
+      io.emit("settings:auto-pause", { enabled });
+
+      logAction(user || null, 'update_auto_pause', 'system_config', 'auto_pause_enabled', `Auto-Pause feature ${enabled ? 'enabled' : 'disabled'}`);
+      
+      res.json({ success: true, enabled });
+    } catch (err) {
+      console.error("Error setting auto-pause:", err);
+      res.status(500).json({ error: "Failed to update setting" });
+    }
+  });
+
+  // Auto-pause background task
+  setInterval(async () => {
+    try {
+      const autoPause = getSystemConfig("auto_pause_enabled") === "true";
+      if (!autoPause) return;
+
+      const scores = await calculateDuckDBRiskScores();
+      const licenses = getAllLicenses();
+
+      for (const license of licenses) {
+        if (license.status === 'active') {
+          const scoreData = scores[license.id];
+          if (scoreData && scoreData.risk_score > 90) {
+            updateLicenseStatus(license.id, 'suspended');
+            io.emit("licenses:status_updated", { id: license.id, status: 'suspended' });
+            
+            // Log the action
+            logLicenseEvent({
+              id: crypto.randomUUID(),
+              license_id: license.id,
+              event_type: 'suspension',
+              event_data: JSON.stringify({ reason: `Risk score exceeded 90 (${scoreData.risk_score})` }),
+              timestamp: new Date().toISOString()
+            });
+
+            logAction(null, 'auto_suspend', 'license', license.id, `License auto-suspended due to risk score ${scoreData.risk_score} > 90`);
+            io.emit("audit_logs:updated", getAllAuditLogs());
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Auto-pause evaluation error:", err);
+    }
+  }, 10000);
+
   app.get("/api/settings/latency-threshold", (req, res) => {
     const threshold = getSystemConfig("latency_threshold");
     res.json({ threshold: threshold ? parseInt(threshold, 10) : 150 });
@@ -1297,7 +1390,6 @@ async function notifyUsers(event: string, subject: string, text: string) {
   app.get("/api/license/:id/events", (req, res) => {
     try {
       const { id } = req.params;
-      const { getLicenseEvents } = require("./src/db");
       const events = getLicenseEvents(id);
       res.json(events);
     } catch (err) {
@@ -1308,7 +1400,6 @@ async function notifyUsers(event: string, subject: string, text: string) {
 
   app.get("/api/events", (req, res) => {
     try {
-      const { getAllEvents } = require("./src/db");
       const events = getAllEvents();
       res.json(events);
     } catch (err) {
