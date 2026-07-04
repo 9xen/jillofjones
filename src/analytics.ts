@@ -181,7 +181,7 @@ export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAn
       const failed_pings_last_hour = Number(r.failed_pings_last_hour || 0);
       const distinct_ips = Number(r.distinct_ips || 0);
       const distinct_hwids = Number(r.distinct_hwids || 0);
-      const high_risk_flag = failed_pings_last_hour > 5;
+      const high_risk_flag = failed_pings_last_hour > 2;
 
       // Risk Score calculation matrix
       let score = 0;

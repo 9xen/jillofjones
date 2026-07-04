@@ -6,9 +6,8 @@ import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Cl
 import { jsPDF } from 'jspdf';
 import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, RadialBarChart, RadialBar } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, RadialBarChart, RadialBar, PieChart, Pie, Cell } from 'recharts';
 import { LoginPage } from './components/LoginPage';
-import { createMockSocket } from './mockSocket';
 
 export default function App() {
   const [licenses, setLicenses] = useState<License[]>([]);
@@ -40,6 +39,8 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [renewalAlerts, setRenewalAlerts] = useState<Array<{ id: string, license_id: string, software_name: string, days_remaining: number, expires_at: string, severity: 'critical' | 'warning' | 'info' }>>([]);
+  const [riskAlerts, setRiskAlerts] = useState<Array<{ id: string, license_id: string, software_name: string, score: number, message: string }>>([]);
+  const [riskSnapshots, setRiskSnapshots] = useState<any[]>([]);
   const [simulatedClientKey, setSimulatedClientKey] = useState<string>('');
   const [simulationLogs, setSimulationLogs] = useState<string[]>([]);
   const [systemPublicKey, setSystemPublicKey] = useState<string>('');
@@ -104,21 +105,25 @@ export default function App() {
     showToast('Logged out successfully', 'success');
   };
 
-  const fetchRiskScores = async () => {
+  const fetchRiskSnapshots = async () => {
     if (localStorage.getItem('nonaxen_static_mode') === 'true') {
-      const stored = localStorage.getItem('mock_db_risk_scores');
-      if (stored) {
-        setDuckDBRiskScores(JSON.parse(stored));
-      } else {
-        const { MOCK_RISK_SCORES } = await import('./mockData');
-        setDuckDBRiskScores(MOCK_RISK_SCORES);
-      }
       return;
     }
+    try {
+      const res = await fetch('/api/risk/snapshots');
+      const data = await res.json();
+      setRiskSnapshots(data);
+    } catch (err) {
+      console.error("Failed to fetch risk snapshots:", err);
+    }
+  };
+
+  const fetchRiskScores = async () => {
     try {
       const res = await fetch('/api/analytics/risk-scores');
       const data = await res.json();
       setDuckDBRiskScores(data);
+      await fetchRiskSnapshots();
     } catch (err) {
       console.error("Failed to fetch DuckDB risk scores:", err);
     }
@@ -304,7 +309,13 @@ export default function App() {
   };
 
   
-  const [notificationPrefs, setNotificationPrefs] = useState({ expirations: true, renewals: true, assignments: true });
+  const [notificationPrefs, setNotificationPrefs] = useState({ 
+    expirations: true, 
+    renewals: true, 
+    assignments: true,
+    risk_alerts: true,
+    expiration_alerts: true
+  });
   const [isSavingPrefs, setIsSavingPrefs] = useState(false);
 
   useEffect(() => {
@@ -502,8 +513,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    const isStaticMode = localStorage.getItem('nonaxen_static_mode') === 'true';
-    const socket = isStaticMode ? createMockSocket() : io();
+    const socket = io();
     socketRef.current = socket;
 
     socket.on('connect', () => setConnected(true));
@@ -597,6 +607,36 @@ export default function App() {
     socket.on('licenses:hwid_reset', (id: string) => {
       setLicenses((prev) => prev.map((l) => (l.id === id ? { ...l, hardware_id: null } : l)));
       showToast('Hardware ID lock has been reset', 'success');
+    });
+
+    socket.on('system:alert', (alert: { 
+      type: 'risk' | 'expiration', 
+      license_id: string, 
+      software_name: string,
+      issued_to: string,
+      score?: number,
+      days?: number,
+      message: string 
+    }) => {
+      const isRisk = alert.type === 'risk';
+      showToast(
+        `${isRisk ? '[CRITICAL RISK]' : '[EXPIRATION]'} ${alert.message}`, 
+        isRisk ? 'error' : 'success'
+      );
+      
+      if (isRisk && alert.score !== undefined) {
+        setRiskAlerts(prev => {
+          const exists = prev.find(a => a.license_id === alert.license_id);
+          if (exists) return prev.map(a => a.license_id === alert.license_id ? { ...a, score: alert.score!, message: alert.message } : a);
+          return [...prev, { id: Math.random().toString(36).substr(2, 9), license_id: alert.license_id, software_name: alert.software_name, score: alert.score!, message: alert.message }];
+        });
+      }
+
+      // Also fetch audit logs to keep them updated
+      fetch('/api/audit_logs')
+        .then(res => res.json())
+        .then(data => setAuditLogs(data))
+        .catch(err => console.error('Failed to update audit logs on alert', err));
     });
 
     socket.on('licenses:deleted', (id: string) => {
@@ -1025,27 +1065,48 @@ export default function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden w-full">
-        {/* Renewal Alerts Banner */}
-        {renewalAlerts.length > 0 && (
+        {/* Renewal & Risk Alerts Banner */}
+        {(renewalAlerts.length > 0 || riskAlerts.length > 0) && (
           <div className="bg-rose-500/5 border-b border-rose-500/10 shrink-0">
-            <div className="px-4 lg:px-6 py-2 flex items-center gap-4 overflow-x-auto no-scrollbar">
-              <div className="flex items-center gap-1.5 shrink-0">
-                <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
-                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">Expiration Alerts</span>
-              </div>
-              <div className="flex gap-2">
-                {renewalAlerts.map(alert => (
-                  <div key={alert.id} className={cn(
-                    "flex items-center gap-2 px-2.5 py-0.5 rounded-md text-[10px] font-mono border transition-all",
-                    alert.severity === 'critical' ? "bg-rose-500/20 text-rose-200 border-rose-500/30 shadow-[0_0_10px_rgba(244,63,94,0.1)]" : 
-                    alert.severity === 'warning' ? "bg-amber-500/10 text-amber-300 border-amber-500/20" : 
-                    "bg-zinc-800 text-zinc-400 border-zinc-700"
-                  )}>
-                    <span className="font-bold uppercase">{alert.software_name}</span>
-                    <span className="opacity-70">EXPIRING IN {alert.days_remaining}D</span>
+            <div className="px-4 lg:px-6 py-2 flex items-center gap-6 overflow-x-auto no-scrollbar">
+              {renewalAlerts.length > 0 && (
+                <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
+                    <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">Expiration</span>
                   </div>
-                ))}
-              </div>
+                  <div className="flex gap-2">
+                    {renewalAlerts.map(alert => (
+                      <div key={alert.id} className={cn(
+                        "flex items-center gap-2 px-2.5 py-0.5 rounded-md text-[10px] font-mono border transition-all",
+                        alert.severity === 'critical' ? "bg-rose-500/20 text-rose-200 border-rose-500/30 shadow-[0_0_10px_rgba(244,63,94,0.1)]" : 
+                        alert.severity === 'warning' ? "bg-amber-500/10 text-amber-300 border-amber-500/20" : 
+                        "bg-zinc-800 text-zinc-400 border-zinc-700"
+                      )}>
+                        <span className="font-bold uppercase">{alert.software_name}</span>
+                        <span className="opacity-70">{alert.days_remaining}D</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {riskAlerts.length > 0 && (
+                <div className="flex items-center gap-4 shrink-0 border-l border-zinc-800 pl-6">
+                  <div className="flex items-center gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 text-indigo-400" />
+                    <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">Security</span>
+                  </div>
+                  <div className="flex gap-2">
+                    {riskAlerts.map(alert => (
+                      <div key={alert.id} className="flex items-center gap-2 px-2.5 py-0.5 rounded-md text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 transition-all">
+                        <span className="font-bold uppercase">{alert.software_name}</span>
+                        <span className="opacity-70">RISK: {alert.score}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1595,7 +1656,16 @@ export default function App() {
         )}
 
         {/* Other Tabs */}
-        {activeTab === 'dashboard' && <DashboardView licenses={licenses} riskScores={duckDBRiskScores} />}
+        {activeTab === 'dashboard' && (
+          <DashboardView 
+            licenses={licenses} 
+            riskScores={duckDBRiskScores} 
+            riskAlerts={riskAlerts}
+            renewalAlerts={renewalAlerts}
+            showToast={showToast}
+            riskSnapshots={riskSnapshots}
+          />
+        )}
         {activeTab === 'audit_logs' && <AuditLogsView logs={auditLogs} />}
         {activeTab === 'users' && (
           <UsersView 
@@ -1679,6 +1749,10 @@ export default function App() {
             setSmtp={setSmtp}
             handleSaveSmtp={handleSaveSmtp}
             isSavingSmtp={isSavingSmtp}
+            notificationPrefs={notificationPrefs}
+            setNotificationPrefs={setNotificationPrefs}
+            handleSavePrefs={handleSavePrefs}
+            isSavingPrefs={isSavingPrefs}
           />
         )}
 
@@ -3199,7 +3273,11 @@ function SettingsView({
   smtp,
   setSmtp,
   handleSaveSmtp,
-  isSavingSmtp
+  isSavingSmtp,
+  notificationPrefs,
+  setNotificationPrefs,
+  handleSavePrefs,
+  isSavingPrefs
 }: { 
   showToast: (msg: string, type: 'success'|'error') => void, 
   licenses: License[],
@@ -3212,7 +3290,11 @@ function SettingsView({
   smtp: { host: string, port: number, user: string, pass: string, secure: boolean, from_email: string },
   setSmtp: React.Dispatch<React.SetStateAction<{ host: string, port: number, user: string, pass: string, secure: boolean, from_email: string }>>,
   handleSaveSmtp: () => Promise<void>,
-  isSavingSmtp: boolean
+  isSavingSmtp: boolean,
+  notificationPrefs: { expirations: boolean, renewals: boolean, assignments: boolean, risk_alerts: boolean, expiration_alerts: boolean },
+  setNotificationPrefs: React.Dispatch<React.SetStateAction<{ expirations: boolean, renewals: boolean, assignments: boolean, risk_alerts: boolean, expiration_alerts: boolean }>>,
+  handleSavePrefs: () => Promise<void>,
+  isSavingPrefs: boolean
 }) {
   const [activeTab, setActiveTab] = useState<'general' | 'audit' | 'notifications'>('general');
 
@@ -4727,6 +4809,54 @@ int OnInit() {
           </div>
         </div>
       )}
+
+      {/* Personal Alert Subscriptions */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+          <Mail className="w-4.5 h-4.5 text-indigo-400"/> My Alert Subscriptions
+        </h3>
+        <p className="text-xs text-zinc-400 mb-6 leading-relaxed">
+          As an administrator, you must subscribe to these events to receive the dispatched emails. These preferences are unique to your account.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label className="flex items-center justify-between p-3 bg-zinc-950/40 rounded-lg border border-zinc-800/60 cursor-pointer hover:border-indigo-500/30 transition-colors">
+            <div>
+              <span className="text-xs text-zinc-200 font-semibold block">Risk Violations</span>
+              <span className="text-[10px] text-zinc-500 font-mono">Subscribe to real-time risk alerts</span>
+            </div>
+            <input 
+              type="checkbox" 
+              checked={notificationPrefs.risk_alerts}
+              onChange={(e) => setNotificationPrefs({...notificationPrefs, risk_alerts: e.target.checked})}
+              className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" 
+            />
+          </label>
+
+          <label className="flex items-center justify-between p-3 bg-zinc-950/40 rounded-lg border border-zinc-800/60 cursor-pointer hover:border-indigo-500/30 transition-colors">
+            <div>
+              <span className="text-xs text-zinc-200 font-semibold block">Expiration Warnings</span>
+              <span className="text-[10px] text-zinc-500 font-mono">Subscribe to upcoming expirations</span>
+            </div>
+            <input 
+              type="checkbox" 
+              checked={notificationPrefs.expiration_alerts}
+              onChange={(e) => setNotificationPrefs({...notificationPrefs, expiration_alerts: e.target.checked})}
+              className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" 
+            />
+          </label>
+        </div>
+
+        <div className="mt-6 flex justify-end">
+          <button
+            onClick={handleSavePrefs}
+            disabled={isSavingPrefs}
+            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50"
+          >
+            {isSavingPrefs ? 'Saving...' : 'Update My Subscriptions'}
+          </button>
+        </div>
+      </div>
     </div>
   )}
 </div>
@@ -5517,7 +5647,14 @@ function EditNodeConfigModal({
   );
 }
 
-function DashboardView({ licenses, riskScores }: { licenses: License[], riskScores: Record<string, any> }) {
+function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showToast, riskSnapshots }: { 
+  licenses: License[], 
+  riskScores: Record<string, any>,
+  riskAlerts: any[],
+  renewalAlerts: any[],
+  showToast: (msg: string, type: 'success'|'error') => void,
+  riskSnapshots: any[]
+}) {
   const currentRevenue = licenses.reduce((acc, l) => acc + (l.product_price || 0), 0);
   const currentActive = licenses.filter(l => l.status === 'active').length;
   const [generating, setGenerating] = useState(false);
@@ -5791,9 +5928,169 @@ function DashboardView({ licenses, riskScores }: { licenses: License[], riskScor
     { name: 'Low (0-39)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) < 40).length, fill: '#10b981' }
   ].filter(d => d.value > 0);
 
+  const trendData = riskSnapshots && riskSnapshots.length > 0
+    ? [...riskSnapshots].reverse().map(s => ({
+        time: new Date(s.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        avgScore: Math.round(s.avg_score),
+        critical: s.critical_nodes,
+        total: s.total_nodes
+      }))
+    : [
+        { time: '12:00', avgScore: 32, critical: 0, total: 4 },
+        { time: '13:00', avgScore: 34, critical: 0, total: 4 },
+        { time: '14:00', avgScore: 45, critical: 1, total: 5 },
+        { time: '15:00', avgScore: 41, critical: 0, total: 5 },
+      ];
+
   return (
     <div className="space-y-6">
       
+      {/* System Health & Security Posture */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-zinc-100 font-medium flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-indigo-400" /> System Integrity & Posture
+            </h3>
+            <div className="flex items-center gap-2">
+              <span className={cn(
+                "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border",
+                riskAlerts.length === 0 && renewalAlerts.length === 0 ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                riskAlerts.length > 0 ? "bg-rose-500/10 text-rose-400 border-rose-500/20" : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+              )}>
+                {riskAlerts.length === 0 && renewalAlerts.length === 0 ? 'COMPLIANT' : riskAlerts.length > 0 ? 'BREACH_DETECTED' : 'ACTION_REQUIRED'}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Risk Violations</span>
+              <div className="flex items-baseline gap-2">
+                <span className={cn("text-2xl font-bold font-mono", riskAlerts.length > 0 ? "text-rose-400" : "text-zinc-100")}>{riskAlerts.length}</span>
+                <span className="text-[10px] text-zinc-500 font-mono">active</span>
+              </div>
+            </div>
+            <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Expiring Soon</span>
+              <div className="flex items-baseline gap-2">
+                <span className={cn("text-2xl font-bold font-mono", renewalAlerts.length > 0 ? "text-amber-400" : "text-zinc-100")}>{renewalAlerts.length}</span>
+                <span className="text-[10px] text-zinc-500 font-mono">licenses</span>
+              </div>
+            </div>
+            <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+              <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Network Health</span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold font-mono text-emerald-400">100%</span>
+                <span className="text-[10px] text-zinc-500 font-mono">uptime</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 flex gap-3">
+            <button 
+              onClick={async () => {
+                try {
+                  const res = await fetch('/api/diagnostics/trigger-threshold-check', { method: 'POST' });
+                  if (res.ok) showToast('System integrity scan initiated', 'success');
+                } catch (e) {
+                  showToast('Failed to trigger scan', 'error');
+                }
+              }}
+              className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Scan Integrity
+            </button>
+            <button className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-2">
+              <ShieldAlert className="w-3.5 h-3.5" />
+              Security Logs
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+          <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+            <Activity className="w-4 h-4 text-indigo-400" /> Risk Distribution
+          </h3>
+          <div className="h-48 flex items-center justify-center">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={riskDistribution}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={50}
+                  outerRadius={70}
+                  paddingAngle={5}
+                  dataKey="value"
+                >
+                  {riskDistribution.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.fill} stroke="transparent" />
+                  ))}
+                </Pie>
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
+                  itemStyle={{ color: '#e4e4e7' }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="absolute flex flex-col items-center">
+              <span className="text-xl font-bold text-zinc-100 font-mono">{licenses.length}</span>
+              <span className="text-[8px] text-zinc-500 uppercase font-mono">Total Nodes</span>
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {riskDistribution.map((item, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: item.fill }}></div>
+                <span className="text-[9px] text-zinc-400 truncate">{item.name.split(' ')[0]}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Historical Risk Integrity Trend */}
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h3 className="text-zinc-100 font-medium flex items-center gap-2">
+              <Activity className="w-4 h-4 text-indigo-400" /> Historical Risk & Telemetry Trend
+            </h3>
+            <p className="text-[10px] text-zinc-400 mt-0.5">
+              Live tracked average tamper risk score across all active license nodes.
+            </p>
+          </div>
+          {riskSnapshots && riskSnapshots.length > 0 && (
+            <span className="text-[10px] font-mono text-zinc-500">
+              {riskSnapshots.length} snapshot(s) stored
+            </span>
+          )}
+        </div>
+
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={trendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="colorAvg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#6366f1" stopOpacity={0.2}/>
+                  <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+              <XAxis dataKey="time" stroke="#71717a" fontSize={10} tickLine={false} />
+              <YAxis stroke="#71717a" fontSize={10} domain={[0, 100]} tickLine={false} />
+              <Tooltip
+                contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
+                itemStyle={{ color: '#e4e4e7' }}
+              />
+              <Area type="monotone" dataKey="avgScore" name="Avg Tamper Risk (%)" stroke="#6366f1" fillOpacity={1} fill="url(#colorAvg)" strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
       {/* Predictive Risk Toggle */}
       <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 p-4 rounded-xl">
         <div>

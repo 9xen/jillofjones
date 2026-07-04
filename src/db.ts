@@ -132,6 +132,14 @@ db.exec(`
     expires_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS risk_snapshots (
+    id TEXT PRIMARY KEY,
+    avg_score REAL NOT NULL,
+    critical_nodes INTEGER NOT NULL,
+    total_nodes INTEGER NOT NULL,
+    timestamp TEXT NOT NULL
+  );
+
   -- Create Users table for RBAC
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -144,77 +152,31 @@ db.exec(`
     notification_preferences TEXT DEFAULT '{"expirations":true,"renewals":true,"assignments":true}'
   );
 
-  -- Seed Default Users (Passwords are 'admin123', 'manager123', 'auditor123')
+  // Seed Default Users (Passwords are 'admin123')
   INSERT OR IGNORE INTO users (id, name, email, password, role, created_at)
   VALUES 
-    ('user_01', 'System Admin', 'admin@nonaxen.infra', '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K', 'Administrator', '2026-01-01T00:00:00Z'),
-    ('user_02', 'License Manager', 'manager@nonaxen.infra', '$2b$10$3jkAUF4KqKYmySiU4GwoSutqg/vCAV9XTp3c.Oc7udSlPX1LwbQf2', 'Manager', '2026-01-10T00:00:00Z'),
-    ('user_03', 'Compliance Auditor', 'auditor@nonaxen.infra', '$2b$10$XxZt15ZoOOJ0B7vYxyawbeMojbFl2Rq6aS1wbbTTzDEryiB9IqWSu', 'Auditor', '2026-02-01T00:00:00Z');
+    ('user_01', 'System Admin', 'admin@nonaxen.infra', '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K', 'Administrator', '2026-01-01T00:00:00Z');
 
   -- Ensure existing seeded users have the correct passwords
   UPDATE users SET password = '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K' WHERE id = 'user_01';
-  UPDATE users SET password = '$2b$10$3jkAUF4KqKYmySiU4GwoSutqg/vCAV9XTp3c.Oc7udSlPX1LwbQf2' WHERE id = 'user_02';
-  UPDATE users SET password = '$2b$10$XxZt15ZoOOJ0B7vYxyawbeMojbFl2Rq6aS1wbbTTzDEryiB9IqWSu' WHERE id = 'user_03';
 
   -- Seed Default Licenses
   INSERT OR IGNORE INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle)
-  VALUES 
-    ('lic_01', 'HFT Terminal Alpha', 'Institutional', 'sk_live_HFT_Alpha_001', 'active', 'Polaris Hedge Fund', 'HWID-POLARIS-9832', '192.168.1.100,203.0.113.5', '["HFT_CORE", "MAX_LEVERAGE_100x"]', 10000000, 50000, 1500000, 18000000, 1205, 34910, 412095, '2026-01-15T08:00:00Z', '2027-01-15T08:00:00Z', 12500, 3849.20, 10.5, 75.3, 310.2, '203.0.113.5', 'FP-POLARIS-X', '["forex", "stocks"]', '["ACC-12345", "ACC-67890"]', 'yearly'),
-    ('lic_02', 'Arbitrage Bot v4', 'Professional', 'sk_live_ArbBot_002', 'active', 'Aether Capital', 'HWID-AETHER-2349', '198.51.100.22', '["ARB_STANDARD", "MULTI_EXCHANGE"]', 2000000, 25000, 750000, 9000000, 485, 12904, 150931, '2026-03-10T10:30:00Z', '2026-09-10T10:30:00Z', 4500, 129.50, 2.1, 14.8, 55.4, '198.51.100.22', 'FP-AETHER-4', '["crypto"]', '["BINANCE-API-KEY-HASH-001"]', 'monthly'),
-    ('lic_03', 'Trend Follower Core', 'Starter', 'sk_live_Trend_003', 'suspended', 'Nova Alpha', 'HWID-NOVA-8822', '203.0.113.99', '["TREND_INDICATORS"]', 500000, 10000, 300000, 3600000, 0, 0, 0, '2026-05-01T14:15:00Z', '2026-11-01T14:15:00Z', 1200, 0.00, 0, 0, 0, '203.0.113.99', 'FP-NOVA-Z', '["forex"]', '[]', 'onetime'),
-    ('lic_04', 'HFT Terminal Alpha', 'Institutional', 'sk_live_HFT_Alpha_004', 'active', 'BlackWood Trust', 'HWID-BLACKWOOD-1111', '192.0.2.1', '["HFT_CORE"]', 5000000, 30000, 900000, 10800000, 29014, 895310, 10795320, '2026-02-20T09:00:00Z', '2027-02-20T09:00:00Z', 9500, 5521.80, 24.5, 145.2, 590.5, '192.0.2.1', 'FP-BLACKWOOD-1', '["stocks"]', '["NY-TICKER-FEED-001"]', 'yearly'),
-    ('lic_05', 'Market Maker Pro', 'Professional', 'sk_live_MMPro_005', 'active', 'Orion Capital', 'HWID-ORION-5555', '198.51.100.5', '["MARKET_MAKER_CORE", "LOW_LATENCY_API"]', 4000000, 40000, 1200000, 14400000, 895, 25612, 309485, '2026-04-05T11:00:00Z', '2026-10-05T11:00:00Z', 6000, 3200.00, 15.2, 98.4, 380.1, '198.51.100.5', 'FP-ORION-A', '["crypto", "forex"]', '["BYBIT-001", "MT5-998877"]', 'monthly');
+  VALUES ();
 
   -- Seed Default Verification Events
   INSERT OR IGNORE INTO license_events (id, license_id, event_type, event_data, timestamp)
-  VALUES
-    ('ev_01', 'lic_01', 'verification_success', '{"ip":"203.0.113.5","hardware_id":"HWID-POLARIS-9832"}', '2026-06-25T10:00:00Z'),
-    ('ev_02', 'lic_02', 'verification_success', '{"ip":"198.51.100.22","hardware_id":"HWID-AETHER-2349"}', '2026-06-25T11:00:00Z'),
-    
-    -- lic_04 triggers risk events (Failed pings, IP changes, hardware ID inconsistency)
-    ('ev_03', 'lic_04', 'verification_success', '{"ip":"192.0.2.1","hardware_id":"HWID-BLACKWOOD-1111"}', '2026-06-26T08:00:00Z'),
-    ('ev_04', 'lic_04', 'verification_failed', '{"reason":"IP not whitelisted","ip":"192.0.2.99","hardware_id":"HWID-BLACKWOOD-1111"}', '2026-06-26T09:30:00Z'),
-    ('ev_05', 'lic_04', 'verification_failed', '{"reason":"Hardware ID mismatch","ip":"192.0.2.1","hardware_id":"HWID-SUSPECT-9999"}', '2026-06-26T12:00:00Z'),
-    ('ev_06', 'lic_04', 'verification_failed', '{"reason":"IP not whitelisted","ip":"185.190.140.12","hardware_id":"HWID-CLONE-XYZ"}', '2026-06-26T15:15:00Z'),
-    ('ev_07', 'lic_05', 'verification_success', '{"ip":"198.51.100.5","hardware_id":"HWID-ORION-5555"}', '2026-06-26T01:00:00Z'),
-    ('ev_08', 'lic_05', 'verification_success', '{"ip":"198.51.100.5","hardware_id":"HWID-ORION-5555"}', '2026-06-26T06:00:00Z');
+  VALUES ();
 `);
 
 // Seed default software products if empty
 const softwareCount = (db.prepare('SELECT COUNT(*) as count FROM software_products').get() as any).count;
-if (softwareCount === 0) {
-  db.exec(`
-    INSERT OR IGNORE INTO software_products (id, name, description, base_price) VALUES
-      ('prod_1', 'QuantMaster HFT', 'High frequency execution algorithms with low latency market feeds', 12500),
-      ('prod_2', 'AlphaSeeker Neural', 'Neural network models for sentiment and trend predictions', 9500),
-      ('prod_3', 'HedgeBot Pro', 'Algorithmic spot/futures hedge automation system', 6000),
-      ('prod_4', 'Arbitrage Scanner AI', 'Multi-exchange real-time arbitrage scanner', 4500);
-  `);
-}
 
 // Seed default tiers if empty
 const tierCount = (db.prepare('SELECT COUNT(*) as count FROM license_tiers').get() as any).count;
-if (tierCount === 0) {
-  db.exec(`
-    INSERT OR IGNORE INTO license_tiers (id, name, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, description) VALUES
-      ('tier_1', 'Standard', 10000000, 10000, 300000, 3600000, 'Up to $10M Monthly Volume'),
-      ('tier_2', 'Professional', 100000000, 25000, 750000, 9000000, 'Up to $100M Monthly Volume'),
-      ('tier_3', 'Institutional', 1000000000, 50000, 1500000, 18000000, 'Institutional level with unlimited volume limits');
-  `);
-}
 
 // Seed default clients if empty
 const clientCount = (db.prepare('SELECT COUNT(*) as count FROM clients').get() as any).count;
-if (clientCount === 0) {
-  db.exec(`
-    INSERT OR IGNORE INTO clients (id, name, email, mobile, address, extra_info) VALUES
-      ('cli_1', 'Polaris Hedge Fund', 'ops@polaris.com', '+1-555-0199', '120 Wall Street, New York, NY', '{"region":"AMER","payout_terms":"Net-30"}'),
-      ('cli_2', 'Aether Capital', 'contact@aethercap.io', '+44-20-7946-0192', '30 St Mary Axe, London, UK', '{"region":"EMEA","payout_terms":"Net-15"}'),
-      ('cli_3', 'Nova Alpha', 'trade@novaalpha.sg', '+65-6789-0123', 'Marina Bay Financial Centre, Singapore', '{"region":"APAC","payout_terms":"Prepaid"}'),
-      ('cli_4', 'BlackWood Trust', 'admin@blackwood.ch', '+41-22-789-0122', 'Rue du Rhône, Geneva, Switzerland', '{"region":"EMEA","payout_terms":"Net-30"}'),
-      ('cli_5', 'Orion Capital', 'ops@orioncap.com', '+1-415-555-2345', 'Montgomery St, San Francisco, CA', '{"region":"AMER","payout_terms":"Net-30"}');
-  `);
-}
 
 export function getAllLicenses(): License[] {
   return db.prepare('SELECT * FROM licenses ORDER BY created_at DESC').all() as License[];
@@ -642,4 +604,16 @@ export function checkSQLiteHealth() {
 export function updateUserPreferences(id: string, preferences: string): AppUser {
   const stmt = db.prepare('UPDATE users SET notification_preferences = ? WHERE id = ? RETURNING *');
   return stmt.get(preferences, id) as AppUser;
+}
+
+export function createRiskSnapshot(snapshot: { id: string, avg_score: number, critical_nodes: number, total_nodes: number, timestamp: string }): void {
+  const stmt = db.prepare(`
+    INSERT INTO risk_snapshots (id, avg_score, critical_nodes, total_nodes, timestamp)
+    VALUES (@id, @avg_score, @critical_nodes, @total_nodes, @timestamp)
+  `);
+  stmt.run(snapshot);
+}
+
+export function getRiskSnapshots(limit: number = 24): any[] {
+  return db.prepare('SELECT * FROM risk_snapshots ORDER BY timestamp DESC LIMIT ?').all(limit);
 }

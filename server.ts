@@ -20,7 +20,8 @@ import {
   getSystemConfig, setSystemConfig,
   getUserWithPasswordByEmail, updateLastLogin,
   saveRecoveryCode, getRecoveryCode, deleteRecoveryCode, updateUserPassword,
-  checkSQLiteHealth, getLicenseEvents, getAllEvents
+  checkSQLiteHealth, getLicenseEvents, getAllEvents,
+  createRiskSnapshot, getRiskSnapshots
 } from "./src/db";
 import { updateUserPreferences } from "./src/db";
 import { License, AppUser, AuditLog, LicenseEvent } from "./src/types";
@@ -191,6 +192,100 @@ async function notifyUsers(event: string, subject: string, text: string) {
   });
 
   // Reusable Auto-Pause Evaluation logic
+  const lastAlertNotification = new Map<string, number>();
+
+  const runAlertThresholdEvaluation = async () => {
+    try {
+      const riskEnabled = getSystemConfig("notify_risk_score_enabled") === "true";
+      const riskThreshold = parseInt(getSystemConfig("notify_risk_score_threshold") || "80", 10);
+      const expEnabled = getSystemConfig("notify_expiration_enabled") === "true";
+      const expThreshold = parseInt(getSystemConfig("notify_expiration_threshold") || "7", 10);
+
+      if (!riskEnabled && !expEnabled) return;
+
+      const scores = await calculateDuckDBRiskScores();
+      const licenses = getAllLicenses();
+      const now = Date.now();
+
+      for (const license of licenses) {
+        if (license.status !== 'active') continue;
+
+        // Risk Score Alert
+        if (riskEnabled) {
+          const scoreData = scores[license.id];
+          if (scoreData && scoreData.risk_score > riskThreshold) {
+            const cacheKey = `risk_${license.id}_${Math.floor(scoreData.risk_score / 5)}`; // Alert every 5% increase
+            const lastNotified = lastAlertNotification.get(cacheKey) || 0;
+            
+            if (now - lastNotified > 24 * 60 * 60 * 1000) { // Once per 24h per license per score bracket
+              const subject = `[CRITICAL RISK] License Breach: ${license.software_name}`;
+              const text = `License ID: ${license.id}\nClient: ${license.issued_to}\nRisk Score: ${scoreData.risk_score}%\nThreshold: ${riskThreshold}%\n\nPlease investigate this node for potential tampering.`;
+              
+              await notifyUsers('risk_alerts', subject, text);
+              io.emit("system:alert", { 
+                type: 'risk', 
+                license_id: license.id, 
+                software_name: license.software_name,
+                issued_to: license.issued_to,
+                score: scoreData.risk_score,
+                message: `License ${license.id} breached risk threshold (${scoreData.risk_score}%)`
+              });
+              
+              lastAlertNotification.set(cacheKey, now);
+            }
+          }
+        }
+
+        // Expiration Alert
+        if (expEnabled && license.expires_at) {
+          const diffMs = new Date(license.expires_at).getTime() - now;
+          const daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+          
+          if (daysRemaining > 0 && daysRemaining < expThreshold) {
+            const cacheKey = `exp_${license.id}`;
+            const lastNotified = lastAlertNotification.get(cacheKey) || 0;
+
+            if (now - lastNotified > 7 * 24 * 60 * 60 * 1000) { // Once per week for expiration
+              const subject = `[EXPIRATION WARNING] License Expiring Soon: ${license.software_name}`;
+              const text = `License ID: ${license.id}\nClient: ${license.issued_to}\nExpires In: ${daysRemaining} days\nDate: ${new Date(license.expires_at).toLocaleDateString()}\n\nPlease renew this license to prevent service interruption.`;
+              
+              await notifyUsers('expiration_alerts', subject, text);
+              io.emit("system:alert", { 
+                type: 'expiration', 
+                license_id: license.id, 
+                software_name: license.software_name,
+                issued_to: license.issued_to,
+                days: daysRemaining,
+                message: `License ${license.id} expires in ${daysRemaining} days`
+              });
+              
+              lastAlertNotification.set(cacheKey, now);
+            }
+          }
+        }
+      }
+      
+      // Capture Risk Snapshot for Trends
+      const scoreValues = Object.values(scores);
+      if (scoreValues.length > 0) {
+        const totalScore = scoreValues.reduce((acc, s) => acc + s.risk_score, 0);
+        const criticalCount = scoreValues.filter(s => s.risk_score > riskThreshold).length;
+        
+        createRiskSnapshot({
+          id: crypto.randomUUID(),
+          avg_score: totalScore / scoreValues.length,
+          critical_nodes: criticalCount,
+          total_nodes: scoreValues.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      setSystemConfig("last_threshold_check_at", new Date().toISOString());
+    } catch (err) {
+      console.error("Alert threshold evaluation error:", err);
+    }
+  };
+
   const runAutoPauseEvaluation = async () => {
     try {
       const autoPause = getSystemConfig("auto_pause_enabled") === "true";
@@ -235,7 +330,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
       const failedCount = getFailedVerificationsInLastHour(event.license_id, oneHourAgo);
 
-      if (failedCount > 5) {
+      if (failedCount > 2) {
         // Log high risk anomaly event
         logAction(
           null,
@@ -1154,7 +1249,26 @@ async function notifyUsers(event: string, subject: string, text: string) {
   // Auto-pause background task
   setInterval(async () => {
     await runAutoPauseEvaluation();
+    await runAlertThresholdEvaluation();
   }, 10000);
+
+  app.post("/api/diagnostics/trigger-threshold-check", async (req, res) => {
+    try {
+      await runAlertThresholdEvaluation();
+      res.json({ status: "success", timestamp: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/risk/snapshots", (req, res) => {
+    try {
+      const snapshots = getRiskSnapshots(parseInt(req.query.limit as string || "24", 10));
+      res.json(snapshots);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 
   app.get("/api/settings/latency-threshold", (req, res) => {
     const threshold = getSystemConfig("latency_threshold");
@@ -1608,6 +1722,17 @@ async function notifyUsers(event: string, subject: string, text: string) {
       const created = createUser(req.body);
       io.emit("users:created", created);
       res.json(created);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.put("/api/users/:id/preferences", (req, res) => {
+    try {
+      const { id } = req.params;
+      const preferences = JSON.stringify(req.body);
+      const updatedUser = updateUserPreferences(id, preferences);
+      res.json(updatedUser);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
