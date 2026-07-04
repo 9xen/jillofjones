@@ -1176,6 +1176,37 @@ async function notifyUsers(event: string, subject: string, text: string) {
     }
   });
 
+  app.get("/api/settings/notifications", (req, res) => {
+    const riskEnabled = getSystemConfig("notify_risk_score_enabled") || "false";
+    const riskThreshold = getSystemConfig("notify_risk_score_threshold") || "80";
+    const expEnabled = getSystemConfig("notify_expiration_enabled") || "false";
+    const expThreshold = getSystemConfig("notify_expiration_threshold") || "7";
+    res.json({
+      riskEnabled: riskEnabled === "true",
+      riskThreshold: parseInt(riskThreshold, 10),
+      expEnabled: expEnabled === "true",
+      expThreshold: parseInt(expThreshold, 10)
+    });
+  });
+
+  app.post("/api/settings/notifications", (req, res) => {
+    try {
+      const { riskEnabled, riskThreshold, expEnabled, expThreshold, user } = req.body;
+      setSystemConfig("notify_risk_score_enabled", riskEnabled ? "true" : "false");
+      setSystemConfig("notify_risk_score_threshold", String(riskThreshold));
+      setSystemConfig("notify_expiration_enabled", expEnabled ? "true" : "false");
+      setSystemConfig("notify_expiration_threshold", String(expThreshold));
+      
+      io.emit("settings:notifications", { riskEnabled, riskThreshold, expEnabled, expThreshold });
+      logAction(user || null, 'update_notification_thresholds', 'system_config', 'notification_thresholds', `Notification thresholds updated: Risk > ${riskThreshold}% (${riskEnabled ? 'Enabled' : 'Disabled'}), Expiration < ${expThreshold} days (${expEnabled ? 'Enabled' : 'Disabled'})`);
+      io.emit("audit_logs:updated", getAllAuditLogs());
+      
+      res.json({ success: true, riskEnabled, riskThreshold, expEnabled, expThreshold });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update notification settings" });
+    }
+  });
+
   app.get("/api/system/public-key", (req, res) => {
     res.json({ publicKey });
   });

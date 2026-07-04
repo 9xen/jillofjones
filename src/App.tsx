@@ -3214,6 +3214,21 @@ function SettingsView({
   handleSaveSmtp: () => Promise<void>,
   isSavingSmtp: boolean
 }) {
+  const [activeTab, setActiveTab] = useState<'general' | 'audit' | 'notifications'>('general');
+
+  const [riskEnabled, setRiskEnabled] = useState(false);
+  const [riskThreshold, setRiskThreshold] = useState(80);
+  const [expEnabled, setExpEnabled] = useState(false);
+  const [expThreshold, setExpThreshold] = useState(7);
+  const [isSavingNotifications, setIsSavingNotifications] = useState(false);
+  const [isSimulatingNotificationAlert, setIsSimulatingNotificationAlert] = useState(false);
+  const [simulatedAlertData, setSimulatedAlertData] = useState<{
+    subject: string;
+    body: string;
+    triggeredBy: string;
+    recipients: string;
+  } | null>(null);
+
   const [isRotating, setIsRotating] = useState(false);
   const [isSavingLatency, setIsSavingLatency] = useState(false);
 
@@ -3224,12 +3239,27 @@ function SettingsView({
     if (localStorage.getItem('nonaxen_static_mode') === 'true') {
       const saved = localStorage.getItem('mock_db_auto_pause');
       setAutoPauseEnabled(saved === 'true');
+      
+      setRiskEnabled(localStorage.getItem('mock_db_notify_risk_score_enabled') === 'true');
+      setRiskThreshold(Number(localStorage.getItem('mock_db_notify_risk_score_threshold') || '80'));
+      setExpEnabled(localStorage.getItem('mock_db_notify_expiration_enabled') === 'true');
+      setExpThreshold(Number(localStorage.getItem('mock_db_notify_expiration_threshold') || '7'));
       return;
     }
     fetch('/api/settings/auto-pause')
       .then(res => res.json())
       .then(data => setAutoPauseEnabled(data.enabled))
       .catch(err => console.error('Failed to fetch auto-pause setting', err));
+
+    fetch('/api/settings/notifications')
+      .then(res => res.json())
+      .then(data => {
+        setRiskEnabled(data.riskEnabled);
+        setRiskThreshold(data.riskThreshold);
+        setExpEnabled(data.expEnabled);
+        setExpThreshold(data.expThreshold);
+      })
+      .catch(err => console.error('Failed to fetch notification settings', err));
   }, []);
 
   const handleToggleAutoPause = async () => {
@@ -3328,6 +3358,165 @@ function SettingsView({
     } finally {
       setIsSavingLatency(false);
     }
+  };
+
+  const handleSaveNotifications = async () => {
+    setIsSavingNotifications(true);
+    try {
+      if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+        localStorage.setItem('mock_db_notify_risk_score_enabled', riskEnabled ? 'true' : 'false');
+        localStorage.setItem('mock_db_notify_risk_score_threshold', String(riskThreshold));
+        localStorage.setItem('mock_db_notify_expiration_enabled', expEnabled ? 'true' : 'false');
+        localStorage.setItem('mock_db_notify_expiration_threshold', String(expThreshold));
+        
+        const logs = JSON.parse(localStorage.getItem('mock_db_audit_logs') || '[]');
+        logs.unshift({
+          id: `log_notif_${Date.now()}`,
+          user_id: currentUser?.id || 'system',
+          user_name: currentUser?.name || 'Administrator',
+          action: 'update_notification_thresholds',
+          entity_type: 'system_config',
+          entity_id: 'notification_thresholds',
+          details: `Notification thresholds updated: Risk > ${riskThreshold}% (${riskEnabled ? 'Enabled' : 'Disabled'}), Expiration < ${expThreshold} days (${expEnabled ? 'Enabled' : 'Disabled'})`,
+          timestamp: new Date().toISOString()
+        });
+        localStorage.setItem('mock_db_audit_logs', JSON.stringify(logs));
+        
+        showToast('Notification thresholds updated successfully (Local Session)', 'success');
+        setIsSavingNotifications(false);
+        return;
+      }
+      const res = await fetch('/api/settings/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          riskEnabled,
+          riskThreshold,
+          expEnabled,
+          expThreshold,
+          user: currentUser
+        })
+      });
+      if (res.ok) {
+        showToast('Notification thresholds updated successfully', 'success');
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch (err) {
+      showToast('Error saving notification thresholds', 'error');
+    } finally {
+      setIsSavingNotifications(false);
+    }
+  };
+
+  const handleSimulateNotificationAlert = () => {
+    if (!riskEnabled && !expEnabled) {
+      showToast('Please enable at least one notification trigger threshold first.', 'error');
+      return;
+    }
+
+    setIsSimulatingNotificationAlert(true);
+
+    // Retrieve risk scores map
+    let riskScores: Record<string, { risk_score: number }> = {};
+    try {
+      const stored = localStorage.getItem('mock_db_risk_scores');
+      if (stored) {
+        riskScores = JSON.parse(stored);
+      } else {
+        // Fallback mockup
+        riskScores = {
+          'lic_01': { risk_score: 12 },
+          'lic_02': { risk_score: 45 },
+          'lic_03': { risk_score: 8 },
+          'lic_04': { risk_score: 94 },
+        };
+      }
+    } catch (e) {
+      console.error(e);
+    }
+
+    const triggeredRisks: Array<{ license: License; score: number }> = [];
+    const triggeredExpirations: Array<{ license: License; days: number }> = [];
+
+    licenses.forEach(l => {
+      // Check risk score trigger
+      if (riskEnabled) {
+        const score = riskScores[l.id]?.risk_score ?? (l.id === 'lic_04' ? 94 : 15);
+        if (score > riskThreshold) {
+          triggeredRisks.push({ license: l, score });
+        }
+      }
+
+      // Check expiration trigger
+      if (expEnabled && l.expires_at) {
+        const diffMs = new Date(l.expires_at).getTime() - Date.now();
+        const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        if (days > 0 && days < expThreshold) {
+          triggeredExpirations.push({ license: l, days });
+        }
+      }
+    });
+
+    if (triggeredRisks.length === 0 && triggeredExpirations.length === 0) {
+      // If no license triggers, fabricate one simulation so the admin sees the alert payload in action
+      const mockLicense = licenses[0] || {
+        id: 'lic_sim',
+        license_key: 'SIM-KEY-ALPHA-7777',
+        issued_to: 'Simulated Suspect Corp',
+        software_name: 'Advanced Arbitrage Bot',
+        tier: 'enterprise',
+        expires_at: new Date(Date.now() + 2 * 24 * 3600000).toISOString()
+      };
+      triggeredRisks.push({ license: mockLicense as any, score: Math.max(riskThreshold + 5, 85) });
+      triggeredExpirations.push({ license: mockLicense as any, days: Math.max(1, expThreshold - 2) });
+    }
+
+    // Format Email Body
+    let bodyText = `Dear Systems Administrator,\n\n`;
+    bodyText += `This is an automated critical notification from your Nonaxen Licensing & Anti-Tamper Core.\n`;
+    bodyText += `The following nodes or licenses have breached your configured alert thresholds:\n\n`;
+
+    if (triggeredRisks.length > 0) {
+      bodyText += `============================================================\n`;
+      bodyText += `⚠️ HIGH-RISK DETECTIONS (Threshold: > ${riskThreshold}%)\n`;
+      bodyText += `============================================================\n`;
+      triggeredRisks.forEach(tr => {
+        bodyText += `- Client: ${tr.license.issued_to}\n`;
+        bodyText += `  Product: ${tr.license.software_name}\n`;
+        bodyText += `  Key: ${tr.license.license_key || 'N/A'}\n`;
+        bodyText += `  Current Risk Score: ${tr.score}% (CRITICAL POLICY VIOLATION)\n\n`;
+      });
+    }
+
+    if (triggeredExpirations.length > 0) {
+      bodyText += `============================================================\n`;
+      bodyText += `⏳ EXPIRATION WARNINGS (Threshold: < ${expThreshold} Days)\n`;
+      bodyText += `============================================================\n`;
+      triggeredExpirations.forEach(te => {
+        bodyText += `- Client: ${te.license.issued_to}\n`;
+        bodyText += `  Product: ${te.license.software_name}\n`;
+        bodyText += `  Key: ${te.license.license_key || 'N/A'}\n`;
+        bodyText += `  Days Remaining: ${te.days} days (Expires ${new Date(te.license.expires_at!).toLocaleDateString()})\n\n`;
+      });
+    }
+
+    bodyText += `Action Required:\n`;
+    bodyText += `Please log in to the Nonaxen Security Shield administrative panel to review these anomalies, reset hardware bindings, or suspend non-compliant licenses.\n\n`;
+    bodyText += `Regards,\n`;
+    bodyText += `Nonaxen Compliance & Licensing Robot`;
+
+    const recipientList = recipients || 'secops@nonaxen.infra';
+
+    setSimulatedAlertData({
+      subject: `[CRITICAL SECURITY ALERT] Threshold Breach on Nonaxen Licensing Engine`,
+      body: bodyText,
+      triggeredBy: `Risk Score (> ${riskThreshold}%) / Expiration (< ${expThreshold} days)`,
+      recipients: recipientList
+    });
+
+    showToast('Trigger alert evaluation completed (Simulated Dispatch)', 'success');
+    setIsSimulatingNotificationAlert(false);
   };
   const [schedule, setSchedule] = useState<AuditSchedule | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -3801,7 +3990,46 @@ int OnInit() {
 
   return (
     <div className="max-w-2xl space-y-6">
-      {/* Schedule Auto-Audit Section */}
+      {/* Sub-tabs header */}
+      <div className="flex border-b border-zinc-800/80 mb-6 font-mono text-xs select-none">
+        <button
+          onClick={() => setActiveTab('general')}
+          className={`px-4 py-3 border-b-2 font-semibold transition-all flex items-center gap-2 cursor-pointer ${
+            activeTab === 'general'
+              ? 'border-indigo-500 text-indigo-400 bg-indigo-500/5 font-bold'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          <Settings className="w-3.5 h-3.5" />
+          GENERAL_CONFIG
+        </button>
+        <button
+          onClick={() => setActiveTab('audit')}
+          className={`px-4 py-3 border-b-2 font-semibold transition-all flex items-center gap-2 cursor-pointer ${
+            activeTab === 'audit'
+              ? 'border-indigo-500 text-indigo-400 bg-indigo-500/5 font-bold'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          <Mail className="w-3.5 h-3.5" />
+          AUDIT_&_SMTP
+        </button>
+        <button
+          onClick={() => setActiveTab('notifications')}
+          className={`px-4 py-3 border-b-2 font-semibold transition-all flex items-center gap-2 cursor-pointer ${
+            activeTab === 'notifications'
+              ? 'border-indigo-500 text-indigo-400 bg-indigo-500/5 font-bold'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          <Bell className="w-3.5 h-3.5" />
+          NOTIFICATIONS_ALERTS
+        </button>
+      </div>
+
+      {activeTab === 'audit' && (
+        <>
+          {/* Schedule Auto-Audit Section */}
       <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-zinc-100 font-medium flex items-center gap-2">
@@ -4148,7 +4376,11 @@ int OnInit() {
           </div>
         </div>
       </div>
+    </>
+  )}
 
+  {activeTab === 'general' && (
+    <>
       {/* General Settings Card */}
       <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
         <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2"><Settings className="w-4 h-4 text-indigo-400"/> General Settings</h3>
@@ -4284,37 +4516,220 @@ int OnInit() {
         </div>
       </div>
 
-      {/* Security & Alerts Card */}
-      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-indigo-400"/> Security & Alerts</h3>
-        <div className="space-y-4">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" defaultChecked className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
-            <span className="text-sm text-zinc-300">Auto-suspend on hardware mismatch</span>
-          </label>
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" defaultChecked className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
-            <span className="text-sm text-zinc-300">Alert on multiple failed pings</span>
-          </label>
-          <div className="mt-4">
-            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-2">Expiration Alert Thresholds (Days)</label>
-            <div className="flex gap-2">
-              {[7, 14, 30].map(days => (
-                <label key={days} className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-lg border border-zinc-800 cursor-pointer">
-                  <input type="checkbox" className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
-                  <span className="text-xs text-zinc-300">{days} Days</span>
-                </label>
-              ))}
-            </div>
+    </>
+  )}
+
+  {activeTab === 'audit' && (
+    <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+      <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-indigo-400"/> Security & Alerts</h3>
+      <div className="space-y-4">
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" defaultChecked className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+          <span className="text-sm text-zinc-300">Auto-suspend on hardware mismatch</span>
+        </label>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" defaultChecked className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+          <span className="text-sm text-zinc-300">Alert on multiple failed pings</span>
+        </label>
+        <div className="mt-4">
+          <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-2">Expiration Alert Thresholds (Days)</label>
+          <div className="flex gap-2">
+            {[7, 14, 30].map(days => (
+              <label key={days} className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-lg border border-zinc-800 cursor-pointer">
+                <input type="checkbox" className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                <span className="text-xs text-zinc-300">{days} Days</span>
+              </label>
+            ))}
           </div>
-          <div>
-            <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1 mt-4">Security Contact Email</label>
-            <input type="email" defaultValue="secops@quantfund.net" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs outline-none focus:border-indigo-500 transition-colors" />
-          </div>
-          <button onClick={() => showToast('Security preferences updated', 'success')} className="bg-zinc-800 text-zinc-200 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors mt-2">Save Preferences</button>
         </div>
+        <div>
+          <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1 mt-4">Security Contact Email</label>
+          <input type="email" defaultValue="secops@quantfund.net" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs outline-none focus:border-indigo-500 transition-colors" />
+        </div>
+        <button onClick={() => showToast('Security preferences updated', 'success')} className="bg-zinc-800 text-zinc-200 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold hover:bg-zinc-700 transition-colors mt-2">Save Preferences</button>
       </div>
     </div>
+  )}
+
+  {activeTab === 'notifications' && (
+    <div className="space-y-6">
+      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
+        <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
+          <Bell className="w-4.5 h-4.5 text-indigo-400"/> Custom Email Trigger Thresholds
+        </h3>
+        <p className="text-xs text-zinc-400 mb-6 leading-relaxed">
+          Configure precise alarm parameters to dispatch critical email warnings via the SMTP relay. The license monitoring engine evaluates these triggers on every hardware ping and compliance check.
+        </p>
+
+        <div className="space-y-6">
+          {/* Risk Score Trigger */}
+          <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs text-zinc-200 font-semibold block">Risk Index Violation Alerts</span>
+                <span className="text-[10px] text-zinc-500 font-mono mt-0.5 block">Triggered when any license or client node risk score exceeds limits</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  checked={riskEnabled} 
+                  onChange={(e) => setRiskEnabled(e.target.checked)}
+                  className="sr-only peer" 
+                />
+                <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-zinc-400 after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500 peer-checked:after:bg-zinc-950"></div>
+              </label>
+            </div>
+
+            {riskEnabled && (
+              <div className="pt-2 border-t border-zinc-900/60 flex items-center gap-4">
+                <div className="w-full max-w-[240px]">
+                  <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Trigger Threshold (%)</label>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="range"
+                      min="10"
+                      max="95"
+                      step="5"
+                      value={riskThreshold}
+                      onChange={(e) => setRiskThreshold(Number(e.target.value))}
+                      className="w-full accent-indigo-500 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <span className="text-xs font-mono text-indigo-400 font-bold min-w-[32px] text-right">{riskThreshold}%</span>
+                  </div>
+                </div>
+                <div className="text-[10px] text-zinc-500 font-mono leading-normal pl-4 border-l border-zinc-800">
+                  Alerts generated when calculated risk score is &gt; {riskThreshold}%. Default standard threshold is 80%.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Expiration Trigger */}
+          <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs text-zinc-200 font-semibold block">Approaching Expiration Warnings</span>
+                <span className="text-[10px] text-zinc-500 font-mono mt-0.5 block">Triggered when any active license is close to expiring</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  checked={expEnabled} 
+                  onChange={(e) => setExpEnabled(e.target.checked)}
+                  className="sr-only peer" 
+                />
+                <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-zinc-400 after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500 peer-checked:after:bg-zinc-950"></div>
+              </label>
+            </div>
+
+            {expEnabled && (
+              <div className="pt-2 border-t border-zinc-900/60 flex items-center gap-4">
+                <div className="w-full max-w-[240px]">
+                  <label className="block text-[9px] font-mono text-zinc-500 uppercase mb-1">Trigger Limit (Days Remaining)</label>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="number"
+                      min="1"
+                      max="90"
+                      value={expThreshold}
+                      onChange={(e) => setExpThreshold(Math.max(1, Number(e.target.value) || 7))}
+                      className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-1.5 text-zinc-200 font-mono text-xs outline-none focus:border-indigo-500 transition-colors"
+                    />
+                    <span className="text-xs text-zinc-500 font-mono">Days</span>
+                  </div>
+                </div>
+                <div className="text-[10px] text-zinc-500 font-mono leading-normal pl-4 border-l border-zinc-800">
+                  Alerts generated when any license reaches &lt; {expThreshold} days from expiration. Standard recommendation is 7 days.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex gap-3 justify-end mt-8 pt-4 border-t border-zinc-800/60">
+          <button
+            type="button"
+            onClick={handleSimulateNotificationAlert}
+            disabled={isSimulatingNotificationAlert}
+            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 px-4 py-2 rounded-md text-xs font-semibold transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50"
+          >
+            {isSimulatingNotificationAlert ? (
+              <>
+                <span className="w-3 h-3 border-2 border-zinc-500 border-t-zinc-200 rounded-full animate-spin"></span>
+                Evaluating...
+              </>
+            ) : (
+              <>
+                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                Simulate Threshold Check
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSaveNotifications}
+            disabled={isSavingNotifications}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-md text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+          >
+            {isSavingNotifications ? (
+              <>
+                <span className="w-3 h-3 border-2 border-indigo-400 border-t-white rounded-full animate-spin"></span>
+                Saving...
+              </>
+            ) : (
+              <>
+                <Check className="w-3.5 h-3.5" />
+                Save Thresholds
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Simulated Email Modal overlay if available */}
+      {simulatedAlertData && (
+        <div className="bg-zinc-900 border border-amber-500/30 rounded-xl p-6 relative overflow-hidden shadow-2xl">
+          <div className="absolute top-0 left-0 w-full h-[3px] bg-gradient-to-r from-amber-500 to-indigo-500"></div>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="p-1 bg-amber-500/10 text-amber-400 rounded">
+                <Mail className="w-4 h-4" />
+              </span>
+              <div>
+                <h4 className="text-zinc-100 text-xs font-bold font-mono">SIMULATED_DISPATCHED_SMTP_PAYLOAD</h4>
+                <p className="text-[10px] text-zinc-500 font-mono">This email was formatted and simulated based on active triggers.</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setSimulatedAlertData(null)}
+              className="text-zinc-500 hover:text-zinc-300 font-mono text-[10px] uppercase border border-zinc-800 hover:border-zinc-700 px-2.5 py-1 rounded cursor-pointer"
+            >
+              Clear Output
+            </button>
+          </div>
+
+          <div className="bg-zinc-950/80 rounded-lg p-4 font-mono text-xs border border-zinc-800/80 text-zinc-300 space-y-3.5 leading-relaxed">
+            <div>
+              <span className="text-zinc-500 uppercase text-[10px] block">To:</span>
+              <span className="text-indigo-400 font-semibold">{simulatedAlertData.recipients}</span>
+            </div>
+            <div>
+              <span className="text-zinc-500 uppercase text-[10px] block">Subject:</span>
+              <span className="text-amber-400 font-semibold">{simulatedAlertData.subject}</span>
+            </div>
+            <div className="pt-3 border-t border-zinc-900">
+              <span className="text-zinc-500 uppercase text-[10px] block mb-2">Message Body:</span>
+              <pre className="text-zinc-300 font-mono text-[10px] overflow-x-auto bg-zinc-950 p-3 rounded border border-zinc-900/60 max-h-[300px] whitespace-pre-wrap leading-relaxed">
+                {simulatedAlertData.body}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )}
+</div>
   );
 }
 
