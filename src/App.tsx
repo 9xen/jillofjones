@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { License, LicenseEvent, Fund, Client, SoftwareProduct, LicenseTier, AuditSchedule, AppUser, AppRole, AuditLog } from './types';
-import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2 } from 'lucide-react';
+import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
@@ -122,7 +122,7 @@ export default function App() {
     setSelectedLicenses(next);
   };
 
-  const executeBulkAction = (action: 'delete' | 'suspend' | 'activate') => {
+  const executeBulkAction = (action: 'delete' | 'suspend' | 'activate' | 'archive' | 'restore') => {
     // Store previous states for undo (only for status changes)
     const previousStates = new Map<string, string>();
     if (action !== 'delete') {
@@ -136,6 +136,8 @@ export default function App() {
 
     selectedLicenses.forEach(id => {
       if (action === 'delete') deleteLicense(id);
+      else if (action === 'archive') updateStatus(id, 'archived');
+      else if (action === 'restore') updateStatus(id, 'active');
       else updateStatus(id, action === 'suspend' ? 'suspended' : 'active');
     });
 
@@ -204,6 +206,24 @@ export default function App() {
     showToast('License extension requested', 'success');
   };
 
+  const renewLicense = (id: string) => {
+    if (!socketRef.current) return;
+    const license = licenses.find(l => l.id === id);
+    if (!license) return;
+
+    let newExpiry = new Date(license.expires_at);
+    if (license.billing_cycle === 'monthly') {
+      newExpiry.setMonth(newExpiry.getMonth() + 1);
+    } else {
+      newExpiry.setFullYear(newExpiry.getFullYear() + 1);
+    }
+    const newExpiryIso = newExpiry.toISOString();
+    socketRef.current.emit('licenses:extend', { id, expiresAt: newExpiryIso, user: currentUser });
+    
+    setIsRenewModalOpen(false);
+    showToast('License renewal requested', 'success');
+  };
+
   const calculateRiskScore = (license: License) => {
     let score = 0;
     // Mock calculation based on status, IP, etc.
@@ -228,9 +248,122 @@ export default function App() {
     showToast(`Transferred ${selectedLicenses.size} licenses to ${newFund}`, 'success');
   };
   const [isExtendModalOpen, setIsExtendModalOpen] = useState(false);
+  const [isRenewModalOpen, setIsRenewModalOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
-  const [extendingLicense, setExtendingLicense] = useState<License | null>(null);
+  const [isBatchEditModalOpen, setIsBatchEditModalOpen] = useState(false);
   const [selectedLicense, setSelectedLicense] = useState<License | null>(null);
+  const [extendingLicense, setExtendingLicense] = useState<License | null>(null);
+  const [renewingLicense, setRenewingLicense] = useState<License | null>(null);
+  const [smtp, setSmtp] = useState({ host: '', port: 587, user: '', pass: '', secure: false, from_email: '' });
+  const [isSavingSmtp, setIsSavingSmtp] = useState(false);
+
+  const handleSaveSmtp = async () => {
+    setIsSavingSmtp(true);
+    try {
+      const res = await fetch('/api/smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...smtp,
+          secure: smtp.secure ? 1 : 0
+        })
+      });
+      if (res.ok) {
+        showToast('SMTP settings saved successfully', 'success');
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch (err) {
+      showToast('Error saving SMTP settings', 'error');
+    } finally {
+      setIsSavingSmtp(false);
+    }
+  };
+
+  
+  const [notificationPrefs, setNotificationPrefs] = useState({ expirations: true, renewals: true, assignments: true });
+  const [isSavingPrefs, setIsSavingPrefs] = useState(false);
+
+  useEffect(() => {
+    if (currentUser?.notification_preferences) {
+      try {
+        setNotificationPrefs(JSON.parse(currentUser.notification_preferences));
+      } catch(e) {}
+    }
+  }, [currentUser]);
+
+  const handleSavePrefs = async () => {
+    if (!currentUser) return;
+    setIsSavingPrefs(true);
+    try {
+      const res = await fetch(`/api/users/${currentUser.id}/preferences`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(notificationPrefs)
+      });
+      if (res.ok) {
+        showToast('Notification preferences updated', 'success');
+      } else {
+        showToast('Failed to update preferences', 'error');
+      }
+    } catch (err) {
+      showToast('Error saving preferences', 'error');
+    } finally {
+      setIsSavingPrefs(false);
+    }
+  };
+
+  const handleSaveLatencyThreshold = async () => {
+    try {
+      const res = await fetch('/api/settings/latency-threshold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threshold: latencyThreshold })
+      });
+      if (!res.ok) throw new Error('Failed to save');
+    } catch (err) {
+      showToast('Error saving latency threshold', 'error');
+    }
+  };
+
+  const isInitialSmtp = useRef(true);
+  const isInitialLatency = useRef(true);
+
+  useEffect(() => {
+    if (isInitialSmtp.current) {
+        isInitialSmtp.current = false;
+        return;
+    }
+    const handler = setTimeout(() => {
+      if (smtp.host) {
+        handleSaveSmtp();
+      }
+    }, 1500);
+    return () => clearTimeout(handler);
+  }, [smtp]);
+
+  useEffect(() => {
+    if (isInitialLatency.current) {
+        isInitialLatency.current = false;
+        return;
+    }
+    const handler = setTimeout(() => {
+      handleSaveLatencyThreshold();
+    }, 1500);
+    return () => clearTimeout(handler);
+  }, [latencyThreshold]);
+
+  const batchUpdateSelectedLicenses = (updates: any) => {
+    if (!socketRef.current || selectedLicenses.size === 0) return;
+    socketRef.current.emit('licenses:batch_update', {
+      ids: Array.from(selectedLicenses),
+      updates,
+      user: currentUser
+    });
+    setIsBatchEditModalOpen(false);
+    setSelectedLicenses(new Set());
+    showToast(`Successfully bulk-updated ${selectedLicenses.size} licenses`, 'success');
+  };
   const [events, setEvents] = useState<LicenseEvent[]>([]);
   const [isEventsOpen, setIsEventsOpen] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -349,6 +482,13 @@ export default function App() {
 
     socket.on('licenses:updated', (data: Partial<License> & { id: string }) => {
       setLicenses((prev) => prev.map((l) => (l.id === data.id ? { ...l, ...data } : l)));
+    });
+
+    socket.on('licenses:batch_updated', ({ ids, updates }: { ids: string[], updates: any }) => {
+      setLicenses((prev) =>
+        prev.map((l) => ids.includes(l.id) ? { ...l, ...updates } : l)
+      );
+      fetchRiskScores();
     });
 
     socket.on('licenses:status_updated', ({ id, status }: { id: string, status: string }) => {
@@ -579,7 +719,7 @@ export default function App() {
                           l.software_name.toLowerCase().includes(search.toLowerCase()) ||
                           (l.hardware_id?.toLowerCase().includes(search.toLowerCase()) ?? false) ||
                           (l.ip_whitelist?.toLowerCase().includes(search.toLowerCase()) ?? false);
-    const matchesStatus = filterStatus === 'all' || l.status === filterStatus;
+    const matchesStatus = filterStatus === 'all' ? l.status !== 'archived' : l.status === filterStatus;
     
     const dateValue = new Date(l[dateRange.type]);
     const matchesDate = (!dateRange.start || dateValue >= new Date(dateRange.start)) &&
@@ -837,7 +977,7 @@ export default function App() {
           )}
 
           <div className="flex bg-zinc-950 p-1 rounded-lg ml-auto border border-zinc-800">
-            {['all', 'active', 'suspended', 'revoked'].map(status => (
+            {['all', 'active', 'suspended', 'revoked', 'archived'].map(status => (
               <button
                 key={status}
                 onClick={() => setFilterStatus(status)}
@@ -871,6 +1011,13 @@ export default function App() {
                     <>
                       <button onClick={() => executeBulkAction('activate')} className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-emerald-500/30">Activate</button>
                       <button onClick={() => executeBulkAction('suspend')} className="bg-amber-500/20 text-amber-400 border border-amber-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-amber-500/30">Suspend</button>
+                      {selected.some(l => l.status !== 'archived') && (
+                        <button onClick={() => executeBulkAction('archive')} className="bg-purple-500/20 text-purple-400 border border-purple-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-purple-500/30">Archive</button>
+                      )}
+                      {selected.some(l => l.status === 'archived') && (
+                        <button onClick={() => executeBulkAction('restore')} className="bg-teal-500/20 text-teal-400 border border-teal-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-teal-500/30">Restore</button>
+                      )}
+                      <button onClick={() => setIsBatchEditModalOpen(true)} className="bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-indigo-500/30">Batch Edit</button>
                       <button onClick={() => { setExtendingLicense(null); setIsTransferModalOpen(true); }} className="bg-blue-500/20 text-blue-400 border border-blue-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-blue-500/30">Transfer</button>
                     </>
                   )}
@@ -1117,6 +1264,9 @@ export default function App() {
                             {canManageLicenses && (
                               <>
                                 <div className="w-px h-4 bg-zinc-800 mx-1"></div>
+                                <button onClick={(e) => { e.stopPropagation(); setRenewingLicense(license); setIsRenewModalOpen(true); }} className="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors border border-transparent hover:border-indigo-500/20" title="Renew">
+                                  <RefreshCw className="w-4 h-4" />
+                                </button>
                                 {license.status !== 'active' && (
                                   <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'active'); }} className="p-1.5 text-zinc-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded transition-colors border border-transparent hover:border-emerald-500/20" title="Activate">
                                     <ShieldCheck className="w-4 h-4" />
@@ -1130,6 +1280,16 @@ export default function App() {
                                 {license.status !== 'revoked' && (
                                   <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'revoked'); }} className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors border border-transparent hover:border-rose-500/20" title="Revoke Permanently">
                                     <ShieldAlert className="w-4 h-4" />
+                                  </button>
+                                )}
+                                <div className="w-px h-4 bg-zinc-800 mx-1"></div>
+                                {license.status === 'archived' ? (
+                                  <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'active'); }} className="p-1.5 text-zinc-400 hover:text-teal-400 hover:bg-teal-500/10 rounded transition-colors border border-transparent hover:border-teal-500/20" title="Restore / Retrieve from Archive">
+                                    <Undo2 className="w-4 h-4" />
+                                  </button>
+                                ) : (
+                                  <button onClick={(e) => { e.stopPropagation(); updateStatus(license.id, 'archived'); }} className="p-1.5 text-zinc-400 hover:text-purple-400 hover:bg-purple-500/10 rounded transition-colors border border-transparent hover:border-purple-500/20" title="Archive">
+                                    <Archive className="w-4 h-4" />
                                   </button>
                                 )}
                                 <div className="w-px h-4 bg-zinc-800 mx-1"></div>
@@ -1299,6 +1459,10 @@ export default function App() {
             copyToClipboard={copyToClipboard}
             latencyThreshold={latencyThreshold}
             setLatencyThreshold={setLatencyThreshold}
+            smtp={smtp}
+            setSmtp={setSmtp}
+            handleSaveSmtp={handleSaveSmtp}
+            isSavingSmtp={isSavingSmtp}
           />
         )}
 
@@ -1406,6 +1570,13 @@ export default function App() {
         onExtend={(days) => extendingLicense && extendLicense(extendingLicense.id, days)}
       />
 
+      {/* Renew License Modal */}
+      <RenewLicenseModal 
+        isOpen={isRenewModalOpen}
+        onClose={() => setIsRenewModalOpen(false)}
+        onRenew={() => renewingLicense && renewLicense(renewingLicense.id)}
+      />
+
       {/* Create License Modal */}
       <CreateLicenseModal 
         isOpen={isCreateModalOpen} 
@@ -1414,6 +1585,14 @@ export default function App() {
         clients={clients}
         softwareProducts={softwareProducts}
         licenseTiers={licenseTiers}
+      />
+
+      {/* Batch Edit Modal */}
+      <BatchEditModal 
+        isOpen={isBatchEditModalOpen}
+        onClose={() => setIsBatchEditModalOpen(false)}
+        onSubmit={batchUpdateSelectedLicenses}
+        selectedCount={selectedLicenses.size}
       />
 
       {/* Toast Notification */}
@@ -2771,7 +2950,11 @@ function SettingsView({
   handleGenerateOfflineToken,
   copyToClipboard,
   latencyThreshold,
-  setLatencyThreshold
+  setLatencyThreshold,
+  smtp,
+  setSmtp,
+  handleSaveSmtp,
+  isSavingSmtp
 }: { 
   showToast: (msg: string, type: 'success'|'error') => void, 
   licenses: License[],
@@ -2780,7 +2963,11 @@ function SettingsView({
   handleGenerateOfflineToken: (id: string) => Promise<string | null>,
   copyToClipboard: (text: string) => void,
   latencyThreshold: number,
-  setLatencyThreshold: React.Dispatch<React.SetStateAction<number>>
+  setLatencyThreshold: React.Dispatch<React.SetStateAction<number>>,
+  smtp: { host: string, port: number, user: string, pass: string, secure: boolean, from_email: string },
+  setSmtp: React.Dispatch<React.SetStateAction<{ host: string, port: number, user: string, pass: string, secure: boolean, from_email: string }>>,
+  handleSaveSmtp: () => Promise<void>,
+  isSavingSmtp: boolean
 }) {
   const [isRotating, setIsRotating] = useState(false);
   const [isSavingLatency, setIsSavingLatency] = useState(false);
@@ -2856,8 +3043,6 @@ int OnInit() {
 
   const [isSimulating, setIsSimulating] = useState(false);
   const [simResult, setSimResult] = useState<{ pdfName: string, recipients: string[], timestamp: string, scope: string } | null>(null);
-  const [smtp, setSmtp] = useState({ host: '', port: 587, user: '', pass: '', secure: false, from_email: '' });
-  const [isSavingSmtp, setIsSavingSmtp] = useState(false);
   const [isTestingSmtp, setIsTestingSmtp] = useState(false);
   const [general, setGeneral] = useState({ appName: 'QUANT FUND LICENSING', systemEmail: 'admin@quantfund.net' });
   const [systemPublicKey, setSystemPublicKey] = useState('');
@@ -2902,29 +3087,6 @@ int OnInit() {
       }
     } catch (err) {
       console.error("Failed to fetch settings:", err);
-    }
-  };
-
-  const handleSaveSmtp = async () => {
-    setIsSavingSmtp(true);
-    try {
-      const res = await fetch('/api/smtp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...smtp,
-          secure: smtp.secure ? 1 : 0
-        })
-      });
-      if (res.ok) {
-        showToast('SMTP settings saved successfully', 'success');
-      } else {
-        throw new Error('Failed to save');
-      }
-    } catch (err) {
-      showToast('Error saving SMTP settings', 'error');
-    } finally {
-      setIsSavingSmtp(false);
     }
   };
 
@@ -3741,6 +3903,28 @@ function ExtendLicenseModal({ isOpen, onClose, onExtend }: { isOpen: boolean, on
               +{days} Days
             </button>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RenewLicenseModal({ isOpen, onClose, onRenew }: { isOpen: boolean, onClose: () => void, onRenew: () => void }) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-sm overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+          <h3 className="text-zinc-100 font-medium">Renew License</h3>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6">
+          <p className="text-zinc-400 text-sm mb-6">Are you sure you want to renew this license? The new expiry date will be calculated based on the billing cycle.</p>
+          <button onClick={onRenew} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-lg text-sm font-semibold transition-colors">
+            Confirm Renewal
+          </button>
         </div>
       </div>
     </div>
@@ -4687,6 +4871,14 @@ function DashboardView({ licenses, riskScores }: { licenses: License[], riskScor
   const growth = ((currentMonthRevenue - prevMonthRevenue) / prevMonthRevenue) * 100;
 
   // Prepare Risk Distribution Data for RadialBarChart
+
+  const [showPredictiveRisk, setShowPredictiveRisk] = useState(false);
+  const predictiveRiskLicenses = licenses.filter(l => {
+    const risk = riskScores[l.id]?.risk_score || 0;
+    const isExpiringSoon = (new Date(l.expires_at).getTime() - new Date().getTime()) / (1000 * 3600 * 24) <= 30;
+    return l.status === 'active' && (risk >= 60 || isExpiringSoon);
+  });
+
   const riskDistribution = [
     { name: 'Critical (80-100)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) >= 80).length, fill: '#f43f5e' },
     { name: 'High (60-79)', value: licenses.filter(l => (riskScores[l.id]?.risk_score || 0) >= 60 && (riskScores[l.id]?.risk_score || 0) < 80).length, fill: '#fb923c' },
@@ -4696,6 +4888,80 @@ function DashboardView({ licenses, riskScores }: { licenses: License[], riskScor
 
   return (
     <div className="space-y-6">
+      
+      {/* Predictive Risk Toggle */}
+      <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 p-4 rounded-xl">
+        <div>
+          <h3 className="text-zinc-100 font-medium flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500" /> Predictive Risk Analysis
+          </h3>
+          <p className="text-sm text-zinc-400 mt-1">
+            Highlight active licenses that are likely to expire or be revoked within the next 30 days based on telemetry scores.
+          </p>
+        </div>
+        <button 
+          onClick={() => setShowPredictiveRisk(!showPredictiveRisk)}
+          className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-colors border", 
+            showPredictiveRisk ? "bg-amber-500/10 text-amber-400 border-amber-500/30" : "bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700"
+          )}>
+          {showPredictiveRisk ? 'Hide Risks' : 'Analyze Risks'}
+        </button>
+      </div>
+
+      {showPredictiveRisk && (
+        <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-amber-500/10 bg-amber-500/10">
+            <h4 className="text-amber-500 font-medium text-sm flex items-center gap-2">
+              <Activity className="w-4 h-4" />
+              High-Risk Licenses Detected ({predictiveRiskLicenses.length})
+            </h4>
+          </div>
+          <div className="p-0">
+            <table className="w-full text-left text-sm text-zinc-400">
+              <thead className="text-[10px] uppercase tracking-wider text-zinc-500 bg-black/20 border-b border-amber-500/10">
+                <tr>
+                  <th className="px-6 py-3 font-medium">License ID</th>
+                  <th className="px-6 py-3 font-medium">Client / Project</th>
+                  <th className="px-6 py-3 font-medium">Risk Score</th>
+                  <th className="px-6 py-3 font-medium">Expires In</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/50">
+                {predictiveRiskLicenses.map(l => {
+                  const daysLeft = Math.ceil((new Date(l.expires_at).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
+                  const score = riskScores[l.id]?.risk_score || 0;
+                  return (
+                    <tr key={l.id} className="hover:bg-amber-500/5 transition-colors">
+                      <td className="px-6 py-3 font-mono text-[11px] text-zinc-300">{l.id.substring(0, 8)}...</td>
+                      <td className="px-6 py-3">{l.issued_to}</td>
+                      <td className="px-6 py-3">
+                        <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold", 
+                          score >= 80 ? "bg-rose-500/20 text-rose-400" : score >= 60 ? "bg-amber-500/20 text-amber-400" : "bg-emerald-500/20 text-emerald-400"
+                        )}>
+                          {score}/100
+                        </span>
+                      </td>
+                      <td className="px-6 py-3">
+                        <span className={cn(daysLeft <= 7 ? "text-rose-400 font-medium" : daysLeft <= 30 ? "text-amber-400 font-medium" : "text-zinc-400")}>
+                          {daysLeft} days
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {predictiveRiskLicenses.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-6 py-8 text-center text-zinc-500">
+                      No high-risk licenses detected in the current telemetry window.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Database Diagnostic Card */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-zinc-900/30 border border-zinc-800/80 p-4 rounded-xl backdrop-blur-sm flex items-center gap-4">
@@ -4939,6 +5205,310 @@ function StatusBadge({ status }: { status: string }) {
   if (status === 'revoked') {
     return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>REVOKED</span>;
   }
+  if (status === 'archived') {
+    return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>ARCHIVED</span>;
+  }
   return <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-800 text-zinc-400 border border-zinc-700 w-fit uppercase tracking-widest"><span className="w-1.5 h-1.5 rounded-full bg-zinc-500"></span>EXPIRED</span>;
+}
+
+function BatchEditModal({ 
+  isOpen, 
+  onClose, 
+  onSubmit, 
+  selectedCount 
+}: { 
+  isOpen: boolean; 
+  onClose: () => void; 
+  onSubmit: (updates: any) => void; 
+  selectedCount: number; 
+}) {
+  const [enabledFields, setEnabledFields] = useState<Record<string, boolean>>({
+    expires_at: false,
+    max_volume_usd: false,
+    api_calls_limit: false,
+    api_calls_limit_monthly: false,
+    api_calls_limit_yearly: false,
+    billing_cycle: false,
+    status: false,
+    asset_classes: false,
+    features: false,
+  });
+
+  const [formData, setFormData] = useState({
+    expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    max_volume_usd: 1000000,
+    api_calls_limit: 50000,
+    api_calls_limit_monthly: 1500000,
+    api_calls_limit_yearly: 18000000,
+    billing_cycle: 'monthly',
+    status: 'active',
+    asset_classes: {
+      forex: true,
+      crypto: false,
+      stocks: false,
+    },
+    features: 'HFT_CORE, MAX_LEVERAGE_100x',
+  });
+
+  const toggleField = (field: string) => {
+    setEnabledFields(prev => ({ ...prev, [field]: !prev[field] }));
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const updates: any = {};
+    
+    if (enabledFields.expires_at) {
+      updates.expires_at = new Date(formData.expires_at).toISOString();
+    }
+    if (enabledFields.max_volume_usd) {
+      updates.max_volume_usd = Number(formData.max_volume_usd);
+    }
+    if (enabledFields.api_calls_limit) {
+      updates.api_calls_limit = Number(formData.api_calls_limit);
+    }
+    if (enabledFields.api_calls_limit_monthly) {
+      updates.api_calls_limit_monthly = Number(formData.api_calls_limit_monthly);
+    }
+    if (enabledFields.api_calls_limit_yearly) {
+      updates.api_calls_limit_yearly = Number(formData.api_calls_limit_yearly);
+    }
+    if (enabledFields.billing_cycle) {
+      updates.billing_cycle = formData.billing_cycle;
+    }
+    if (enabledFields.status) {
+      updates.status = formData.status;
+    }
+    if (enabledFields.asset_classes) {
+      const selectedAssets = Object.entries(formData.asset_classes)
+        .filter(([_, enabled]) => enabled)
+        .map(([name]) => name);
+      updates.asset_classes = JSON.stringify(selectedAssets);
+    }
+    if (enabledFields.features) {
+      const parsedFeatures = formData.features
+        .split(',')
+        .map(f => f.trim())
+        .filter(f => f.length > 0);
+      updates.features = JSON.stringify(parsedFeatures);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      alert("Please select at least one field to update.");
+      return;
+    }
+
+    onSubmit(updates);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-2xl overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-950/50">
+          <div>
+            <h3 className="text-zinc-100 font-medium text-sm flex items-center gap-2">
+              <Settings className="w-4 h-4 text-indigo-400" />
+              Batch Edit License Properties
+            </h3>
+            <p className="text-[11px] text-zinc-500 font-mono mt-0.5">
+              Bulk-updating {selectedCount} selected licenses simultaneously.
+            </p>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        
+        <form onSubmit={handleSubmit}>
+          <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto custom-scrollbar">
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-[11px] text-amber-400 font-mono flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold uppercase tracking-wider mb-0.5">Warning</p>
+                <p>Only checked fields will be modified across selected licenses. Unchecked properties will remain intact.</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Expiration Date */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.expires_at ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.expires_at} onChange={() => toggleField('expires_at')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Expiration Date</span>
+                </label>
+                <input 
+                  type="date" 
+                  value={formData.expires_at} 
+                  disabled={!enabledFields.expires_at}
+                  onChange={e => setFormData({ ...formData, expires_at: e.target.value })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50" 
+                />
+              </div>
+
+              {/* Volume limit */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.max_volume_usd ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.max_volume_usd} onChange={() => toggleField('max_volume_usd')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Max Volume (USD)</span>
+                </label>
+                <input 
+                  type="number" 
+                  value={formData.max_volume_usd} 
+                  disabled={!enabledFields.max_volume_usd}
+                  onChange={e => setFormData({ ...formData, max_volume_usd: Number(e.target.value) })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50" 
+                />
+              </div>
+
+              {/* Daily API limit */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.api_calls_limit ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.api_calls_limit} onChange={() => toggleField('api_calls_limit')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Daily API Call Limit</span>
+                </label>
+                <input 
+                  type="number" 
+                  value={formData.api_calls_limit} 
+                  disabled={!enabledFields.api_calls_limit}
+                  onChange={e => setFormData({ ...formData, api_calls_limit: Number(e.target.value) })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50" 
+                />
+              </div>
+
+              {/* Monthly API limit */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.api_calls_limit_monthly ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.api_calls_limit_monthly} onChange={() => toggleField('api_calls_limit_monthly')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Monthly API Limit</span>
+                </label>
+                <input 
+                  type="number" 
+                  value={formData.api_calls_limit_monthly} 
+                  disabled={!enabledFields.api_calls_limit_monthly}
+                  onChange={e => setFormData({ ...formData, api_calls_limit_monthly: Number(e.target.value) })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50" 
+                />
+              </div>
+
+              {/* Yearly API limit */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.api_calls_limit_yearly ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.api_calls_limit_yearly} onChange={() => toggleField('api_calls_limit_yearly')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Yearly API Limit</span>
+                </label>
+                <input 
+                  type="number" 
+                  value={formData.api_calls_limit_yearly} 
+                  disabled={!enabledFields.api_calls_limit_yearly}
+                  onChange={e => setFormData({ ...formData, api_calls_limit_yearly: Number(e.target.value) })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50" 
+                />
+              </div>
+
+              {/* Billing Cycle */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.billing_cycle ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.billing_cycle} onChange={() => toggleField('billing_cycle')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Billing Cycle</span>
+                </label>
+                <select 
+                  value={formData.billing_cycle} 
+                  disabled={!enabledFields.billing_cycle}
+                  onChange={e => setFormData({ ...formData, billing_cycle: e.target.value })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50"
+                >
+                  <option value="monthly">Monthly</option>
+                  <option value="yearly">Yearly</option>
+                  <option value="onetime">One-time</option>
+                </select>
+              </div>
+
+              {/* License Status */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.status ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.status} onChange={() => toggleField('status')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">License Status</span>
+                </label>
+                <select 
+                  value={formData.status} 
+                  disabled={!enabledFields.status}
+                  onChange={e => setFormData({ ...formData, status: e.target.value })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50"
+                >
+                  <option value="active">Active</option>
+                  <option value="suspended">Suspended</option>
+                  <option value="revoked">Revoked</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </div>
+
+              {/* Asset Classes */}
+              <div className={cn("p-4 rounded-xl border transition-all md:col-span-2", enabledFields.asset_classes ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.asset_classes} onChange={() => toggleField('asset_classes')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Allowed Asset Classes</span>
+                </label>
+                <div className="flex items-center gap-6">
+                  {['forex', 'crypto', 'stocks'].map(asset => (
+                    <label key={asset} className="flex items-center gap-2 cursor-pointer select-none text-zinc-300 text-xs font-mono uppercase">
+                      <input 
+                        type="checkbox" 
+                        disabled={!enabledFields.asset_classes}
+                        checked={formData.asset_classes[asset as keyof typeof formData.asset_classes]} 
+                        onChange={e => setFormData({
+                          ...formData,
+                          asset_classes: {
+                            ...formData.asset_classes,
+                            [asset]: e.target.checked
+                          }
+                        })}
+                        className="rounded border-zinc-800 bg-zinc-950 text-indigo-500 focus:ring-indigo-500/20 w-3.5 h-3.5 disabled:opacity-50" 
+                      />
+                      {asset}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Features / Modules */}
+              <div className={cn("p-4 rounded-xl border transition-all md:col-span-2", enabledFields.features ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.features} onChange={() => toggleField('features')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Features / Active Modules (Comma Separated)</span>
+                </label>
+                <input 
+                  type="text" 
+                  value={formData.features} 
+                  disabled={!enabledFields.features}
+                  placeholder="e.g. HFT_CORE, MAX_LEVERAGE_100x"
+                  onChange={e => setFormData({ ...formData, features: e.target.value })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50 placeholder:text-zinc-700" 
+                />
+              </div>
+
+            </div>
+          </div>
+
+          <div className="p-4 border-t border-zinc-800 flex justify-end gap-3 bg-zinc-950/50">
+            <button 
+              type="button" 
+              onClick={onClose} 
+              className="px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit" 
+              className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-xs font-semibold transition-colors"
+            >
+              Apply Bulk Changes
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 

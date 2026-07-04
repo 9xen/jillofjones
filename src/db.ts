@@ -140,7 +140,8 @@ db.exec(`
     password TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    last_login TEXT
+    last_login TEXT,
+    notification_preferences TEXT DEFAULT '{"expirations":true,"renewals":true,"assignments":true}'
   );
 
   -- Seed Default Users (Passwords are 'admin123', 'manager123', 'auditor123')
@@ -306,6 +307,46 @@ export function updateLicenseLastActive(id: string, last_ip: string): void {
 export function deleteLicense(id: string): void {
   const stmt = db.prepare('DELETE FROM licenses WHERE id = @id');
   stmt.run({ id });
+}
+
+export function batchUpdateLicenses(ids: string[], updates: {
+  expires_at?: string;
+  max_volume_usd?: number;
+  api_calls_limit?: number;
+  api_calls_limit_monthly?: number;
+  api_calls_limit_yearly?: number;
+  billing_cycle?: string;
+  status?: string;
+  features?: string;
+  asset_classes?: string;
+  restricted_accounts?: string;
+}): void {
+  if (ids.length === 0 || Object.keys(updates).length === 0) return;
+  
+  const allowedKeys = [
+    'expires_at', 'max_volume_usd', 'api_calls_limit', 
+    'api_calls_limit_monthly', 'api_calls_limit_yearly', 
+    'billing_cycle', 'status', 'features', 'asset_classes', 'restricted_accounts'
+  ];
+  
+  const keys = Object.keys(updates).filter(k => allowedKeys.includes(k) && updates[k as keyof typeof updates] !== undefined);
+  if (keys.length === 0) return;
+
+  const setString = keys.map(k => `${k} = @${k}`).join(', ');
+  const params: Record<string, any> = {};
+  keys.forEach(k => {
+    params[k] = updates[k as keyof typeof updates];
+  });
+  
+  const stmt = db.prepare(`UPDATE licenses SET ${setString} WHERE id = @id`);
+  
+  const transaction = db.transaction((licenseIds: string[]) => {
+    for (const id of licenseIds) {
+      stmt.run({ id, ...params });
+    }
+  });
+  
+  transaction(ids);
 }
 
 export function logLicenseEvent(event: LicenseEvent): void {
@@ -529,3 +570,9 @@ export function checkSQLiteHealth() {
   }
 }
 
+
+
+export function updateUserPreferences(id: string, preferences: string): AppUser {
+  const stmt = db.prepare('UPDATE users SET notification_preferences = ? WHERE id = ? RETURNING *');
+  return stmt.get(preferences, id) as AppUser;
+}

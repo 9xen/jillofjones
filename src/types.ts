@@ -17,6 +17,7 @@ export interface AppUser {
   email: string;
   role: AppRole;
   created_at: string;
+  notification_preferences?: string;
 }
 
 export interface License {
@@ -24,7 +25,7 @@ export interface License {
   software_name: string;
   tier: string;
   license_key: string;
-  status: 'active' | 'revoked' | 'expired' | 'suspended';
+  status: 'active' | 'revoked' | 'expired' | 'suspended' | 'archived';
   issued_to: string;
   hardware_id: string | null;
   ip_whitelist: string | null;

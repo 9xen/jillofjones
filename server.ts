@@ -8,7 +8,7 @@ import cors from "cors";
 import compression from "compression";
 import {
   getAllLicenses, createLicense, updateLicenseStatus, deleteLicense, updateLicenseEarnings, getLicenseByKey, logLicenseEvent,
-  updateLicenseConfig, incrementApiCalls,
+  updateLicenseConfig, incrementApiCalls, batchUpdateLicenses,
   getAllClients, createClient, deleteClient,
   getAllSoftwareProducts, createSoftwareProduct, deleteSoftwareProduct,
   getAllLicenseTiers, createLicenseTier, deleteLicenseTier,
@@ -22,6 +22,7 @@ import {
   saveRecoveryCode, getRecoveryCode, deleteRecoveryCode, updateUserPassword,
   checkSQLiteHealth
 } from "./src/db";
+import { updateUserPreferences } from "./src/db";
 import { License, AppUser, AuditLog } from "./src/types";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
@@ -89,6 +90,23 @@ async function startServer() {
       }
     });
   };
+
+  
+async function notifyUsers(event: string, subject: string, text: string) {
+  const users = getAllUsers();
+  const settings = getSMTPSettings();
+  if (!settings || !settings.host) return;
+
+  for (const user of users) {
+    if (!user.notification_preferences) continue;
+    try {
+      const prefs = JSON.parse(user.notification_preferences);
+      if (prefs[event]) {
+        await sendEmail(user.email, subject, text);
+      }
+    } catch(e) {}
+  }
+}
 
   const sendEmail = async (to: string, subject: string, text: string, html?: string, attachments?: any[]) => {
     const transporter = await getTransporter();
@@ -529,6 +547,16 @@ async function startServer() {
       }
     });
 
+    socket.on("licenses:batch_update", ({ ids, updates, user }: { ids: string[], updates: any, user: AppUser }) => {
+      try {
+        batchUpdateLicenses(ids, updates);
+        io.emit("licenses:batch_updated", { ids, updates });
+        logAction(user, 'batch_update', 'license', ids.join(','), `Batch updated ${ids.length} licenses: ${Object.keys(updates).join(', ')}`);
+      } catch (err) {
+        console.error("Error batch updating licenses:", err);
+      }
+    });
+
     socket.on("node:simulate_api_call", ({ license_key, count }) => {
       try {
         const license = getLicenseByKey(license_key);
@@ -659,8 +687,12 @@ async function startServer() {
 
     socket.on("users:update_role", ({ id, role }: { id: string, role: string }) => {
       try {
+        
         updateUserRole(id, role);
+        const log = createAuditLog('system', 'System', 'update_role', 'user', id, `Updated user role to ${role}`);
+        io.emit('audit:new', log);
         io.emit("users:role_updated", { id, role });
+
       } catch (err) {
         console.error("Error updating user role:", err);
       }
@@ -792,6 +824,12 @@ async function startServer() {
 
     // If there are critical alerts, notify via email (once a day)
     const criticalAlerts = alerts.filter(a => a.severity === 'critical');
+    const warningAlerts = alerts.filter(a => a.severity === 'warning');
+
+    if (criticalAlerts.length > 0 || warningAlerts.length > 0) {
+      const expText = [...criticalAlerts, ...warningAlerts].map(a => `- ${a.software_name}: Expires in ${a.days_remaining} days`).join('\n');
+      notifyUsers('expirations', 'Upcoming License Expirations', `The following licenses are expiring soon:\n\n${expText}`);
+    }
     if (criticalAlerts.length > 0) {
       const settings = getSMTPSettings();
       const schedule = getAuditSchedule();
