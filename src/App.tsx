@@ -8,6 +8,7 @@ import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, RadialBarChart, RadialBar } from 'recharts';
 import { LoginPage } from './components/LoginPage';
+import { createMockSocket } from './mockSocket';
 
 export default function App() {
   const [licenses, setLicenses] = useState<License[]>([]);
@@ -46,6 +47,10 @@ export default function App() {
   const socketRef = useRef<Socket | null>(null);
 
   const fetchPublicKey = async () => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      setSystemPublicKey("MOCK-PUBLIC-KEY-RSA-2048-NETLIFY");
+      return;
+    }
     try {
       const res = await fetch('/api/system/public-key');
       const data = await res.json();
@@ -56,6 +61,11 @@ export default function App() {
   };
 
   const fetchLatencyThreshold = async () => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      const threshold = localStorage.getItem('mock_db_latency_threshold') || "150";
+      setLatencyThreshold(Number(threshold));
+      return;
+    }
     try {
       const res = await fetch('/api/settings/latency-threshold');
       const data = await res.json();
@@ -95,6 +105,16 @@ export default function App() {
   };
 
   const fetchRiskScores = async () => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      const stored = localStorage.getItem('mock_db_risk_scores');
+      if (stored) {
+        setDuckDBRiskScores(JSON.parse(stored));
+      } else {
+        const { MOCK_RISK_SCORES } = await import('./mockData');
+        setDuckDBRiskScores(MOCK_RISK_SCORES);
+      }
+      return;
+    }
     try {
       const res = await fetch('/api/analytics/risk-scores');
       const data = await res.json();
@@ -382,6 +402,35 @@ export default function App() {
   const openEvents = async (license: License) => {
     setSelectedLicense(license);
     setIsEventsOpen(true);
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      const key = `mock_db_events_${license.id}`;
+      const stored = localStorage.getItem(key);
+      if (stored) {
+        setEvents(JSON.parse(stored));
+      } else {
+        // Initial mock events seed
+        let initialEvents: any[] = [
+          {
+            id: `ev_init_${Date.now()}`,
+            license_id: license.id,
+            event_type: 'verification_success',
+            event_data: JSON.stringify({ ip: license.last_active_ip || '203.0.113.5', hardware_id: license.hardware_id || 'HWID-SIMULATED' }),
+            timestamp: new Date(Date.now() - 3600000).toISOString()
+          }
+        ];
+        if (license.id === 'lic_04') {
+          initialEvents = [
+            { id: 'ev_03', license_id: 'lic_04', event_type: 'verification_success', event_data: '{"ip":"192.0.2.1","hardware_id":"HWID-BLACKWOOD-1111"}', timestamp: '2026-06-26T08:00:00Z' },
+            { id: 'ev_04', license_id: 'lic_04', event_type: 'verification_failed', event_data: '{"reason":"IP not whitelisted","ip":"192.0.2.99","hardware_id":"HWID-BLACKWOOD-1111"}', timestamp: '2026-06-26T09:30:00Z' },
+            { id: 'ev_05', license_id: 'lic_04', event_type: 'verification_failed', event_data: '{"reason":"Hardware ID mismatch","ip":"192.0.2.1","hardware_id":"HWID-SUSPECT-9999"}', timestamp: '2026-06-26T12:00:00Z' },
+            { id: 'ev_06', license_id: 'lic_04', event_type: 'verification_failed', event_data: '{"reason":"IP not whitelisted","ip":"185.190.140.12","hardware_id":"HWID-CLONE-XYZ"}', timestamp: '2026-06-26T15:15:00Z' }
+          ];
+        }
+        localStorage.setItem(key, JSON.stringify(initialEvents));
+        setEvents(initialEvents);
+      }
+      return;
+    }
     try {
       const res = await fetch(`/api/license/${license.id}/events`);
       const data = await res.json();
@@ -393,6 +442,46 @@ export default function App() {
   };
 
   const simulatePing = async (license: License) => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      const key = `mock_db_events_${license.id}`;
+      const stored = localStorage.getItem(key);
+      const evs = stored ? JSON.parse(stored) : [];
+      const newEv = {
+        id: `ev_sim_${Date.now()}`,
+        license_id: license.id,
+        event_type: 'verification_success',
+        event_data: JSON.stringify({ ip: license.last_active_ip || '127.0.0.1', hardware_id: license.hardware_id || 'HWID-SIMULATED' }),
+        timestamp: new Date().toISOString()
+      };
+      const updatedEvs = [newEv, ...evs];
+      localStorage.setItem(key, JSON.stringify(updatedEvs));
+      
+      // Update ping/volume stats client side
+      const licensesKey = 'mock_db_licenses';
+      const storedLicenses = localStorage.getItem(licensesKey);
+      if (storedLicenses) {
+        const parsed = JSON.parse(storedLicenses);
+        const updatedLicenses = parsed.map((l: License) => {
+          if (l.id === license.id) {
+            return {
+              ...l,
+              api_calls_count_daily: (l.api_calls_count_daily || 0) + 1,
+              api_calls_count_monthly: (l.api_calls_count_monthly || 0) + 1,
+              api_calls_count_yearly: (l.api_calls_count_yearly || 0) + 1,
+            };
+          }
+          return l;
+        });
+        localStorage.setItem(licensesKey, JSON.stringify(updatedLicenses));
+        setLicenses(updatedLicenses);
+      }
+      
+      showToast('Client ping verification simulated successfully!', 'success');
+      if (isEventsOpen && selectedLicense?.id === license.id) {
+        setEvents(updatedEvs);
+      }
+      return;
+    }
     try {
       await fetch('/api/license/verify', {
         method: 'POST',
@@ -413,7 +502,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    const socket = io();
+    const isStaticMode = localStorage.getItem('nonaxen_static_mode') === 'true';
+    const socket = isStaticMode ? createMockSocket() : io();
     socketRef.current = socket;
 
     socket.on('connect', () => setConnected(true));
@@ -512,6 +602,11 @@ export default function App() {
     socket.on('licenses:deleted', (id: string) => {
       setLicenses((prev) => prev.filter((l) => l.id !== id));
       fetchRiskScores();
+    });
+
+    socket.on('license:anomaly', ({ license_id, failed_count }: { license_id: string, failed_count: number }) => {
+      fetchRiskScores();
+      showToast(`CRITICAL ANOMALY: License ${license_id.substring(0, 8)}... has logged ${failed_count} failed verifications in the last hour!`, 'error');
     });
 
     socket.on('clients:init', (data: Client[]) => {
@@ -1183,8 +1278,15 @@ export default function App() {
                         {visibleColumns.license && (
                           <td className="px-6 py-4">
                             <div className="flex flex-col gap-1.5">
-                              <div className="font-mono text-zinc-300 bg-zinc-950 px-2 py-1 rounded text-xs border border-zinc-800/80 max-w-fit shadow-inner">
-                                {license.license_key}
+                              <div className="flex items-center gap-2">
+                                <div className="font-mono text-zinc-300 bg-zinc-950 px-2 py-1 rounded text-xs border border-zinc-800/80 max-w-fit shadow-inner">
+                                  {license.license_key}
+                                </div>
+                                {duckDBRiskScores[license.id]?.high_risk_flag && (
+                                  <span className="text-[9px] font-mono font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider animate-pulse flex items-center gap-1" title={`${duckDBRiskScores[license.id]?.failed_pings_last_hour} failed verifications in the last hour`}>
+                                    <AlertTriangle className="w-3 h-3 text-rose-400" /> HIGH-RISK
+                                  </span>
+                                )}
                               </div>
                               <span className={cn("text-[10px] font-mono font-medium px-1.5 py-0.5 rounded max-w-fit uppercase tracking-wider", 
                                 license.tier === 'Institutional' ? "bg-purple-500/10 text-purple-400 border border-purple-500/20" :
@@ -1267,6 +1369,11 @@ export default function App() {
                                           <div className="h-full bg-rose-500/50" style={{ width: `${Math.min(((scoreDetails?.failed_pings || 0) * 10) / 1, 100)}%` }} />
                                         </div>
                                         <div className="text-[9px] text-zinc-600 italic">Detected {scoreDetails?.failed_pings || 0} failed verification attempts</div>
+                                        {scoreDetails?.high_risk_flag && (
+                                          <div className="text-[9px] text-rose-400 font-bold mt-1.5 bg-rose-500/10 border border-rose-500/20 rounded px-1.5 py-0.5 flex items-center gap-1">
+                                            ⚠️ ANOMALY: {scoreDetails.failed_pings_last_hour} fails in the last hour!
+                                          </div>
+                                        )}
                                       </div>
 
                                       <div className="space-y-1">
@@ -3114,6 +3221,11 @@ function SettingsView({
   const [isSavingAutoPause, setIsSavingAutoPause] = useState(false);
 
   useEffect(() => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      const saved = localStorage.getItem('mock_db_auto_pause');
+      setAutoPauseEnabled(saved === 'true');
+      return;
+    }
     fetch('/api/settings/auto-pause')
       .then(res => res.json())
       .then(data => setAutoPauseEnabled(data.enabled))
@@ -3124,6 +3236,52 @@ function SettingsView({
     setIsSavingAutoPause(true);
     const newValue = !autoPauseEnabled;
     try {
+      if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+        localStorage.setItem('mock_db_auto_pause', newValue ? 'true' : 'false');
+        setAutoPauseEnabled(newValue);
+        showToast(`Auto-Pause ${newValue ? 'enabled' : 'disabled'} successfully`, 'success');
+        
+        // Simulating the backend suspend trigger immediately if enabled
+        if (newValue) {
+          const storedLicenses = localStorage.getItem('mock_db_licenses');
+          if (storedLicenses) {
+            const parsedLicenses: License[] = JSON.parse(storedLicenses);
+            const scores = JSON.parse(localStorage.getItem('mock_db_risk_scores') || '{}');
+            let updated = false;
+            
+            const newLicenses = parsedLicenses.map(l => {
+              if (l.status === 'active' && scores[l.id]?.risk_score > 90) {
+                updated = true;
+                // Add an audit log
+                const logs = JSON.parse(localStorage.getItem('mock_db_audit_logs') || '[]');
+                logs.unshift({
+                  id: `log_auto_${Date.now()}`,
+                  user_id: 'system',
+                  user_name: 'System Auto-Defender',
+                  action: 'auto_suspend',
+                  entity_type: 'license',
+                  entity_id: l.id,
+                  details: `License auto-suspended due to risk score ${scores[l.id].risk_score} > 90`,
+                  timestamp: new Date().toISOString()
+                });
+                localStorage.setItem('mock_db_audit_logs', JSON.stringify(logs));
+                
+                return { ...l, status: 'suspended' as const };
+              }
+              return l;
+            });
+            
+            if (updated) {
+              localStorage.setItem('mock_db_licenses', JSON.stringify(newLicenses));
+              setTimeout(() => {
+                window.location.reload();
+              }, 1000);
+            }
+          }
+        }
+        setIsSavingAutoPause(false);
+        return;
+      }
       const res = await fetch('/api/settings/auto-pause', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3146,6 +3304,12 @@ function SettingsView({
   const handleSaveLatencyThreshold = async () => {
     setIsSavingLatency(true);
     try {
+      if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+        localStorage.setItem('mock_db_latency_threshold', String(latencyThreshold));
+        showToast('Latency alert threshold updated successfully (Local Session)', 'success');
+        setIsSavingLatency(false);
+        return;
+      }
       const res = await fetch('/api/settings/latency-threshold', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3227,6 +3391,42 @@ int OnInit() {
   };
 
   const fetchSchedule = async () => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      const storedSch = localStorage.getItem('mock_db_audit_schedule');
+      const data = storedSch ? JSON.parse(storedSch) : {
+        id: 'sch_1',
+        enabled: 1,
+        recipients: 'compliance@nonaxen.infra',
+        dispatch_hour: 9,
+        report_scope: 'comprehensive',
+        next_run_at: '2026-08-01T09:00:00Z'
+      };
+      setSchedule(data);
+      setEnabled(data.enabled === 1);
+      setRecipients(data.recipients || '');
+      setDispatchHour(data.dispatch_hour || 0);
+      setReportScope(data.report_scope || 'comprehensive');
+
+      const storedSmtp = localStorage.getItem('mock_db_smtp');
+      const smtpData = storedSmtp ? JSON.parse(storedSmtp) : {
+        host: 'smtp.nonaxen.infra',
+        port: 587,
+        user: 'audit-sender',
+        pass: '••••••••',
+        secure: false,
+        from_email: 'audit@nonaxen.infra'
+      };
+      setSmtp({
+        ...smtpData,
+        secure: smtpData.secure === 1 || smtpData.secure === true
+      });
+
+      setSystemPublicKey("MOCK-PUBLIC-KEY-RSA-2048-NETLIFY");
+      
+      const threshold = localStorage.getItem('mock_db_latency_threshold') || "150";
+      setLatencyThreshold(Number(threshold));
+      return;
+    }
     try {
       const res = await fetch('/api/audit-schedule');
       const data = await res.json();
@@ -3267,6 +3467,13 @@ int OnInit() {
       return;
     }
     setIsTestingSmtp(true);
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      setTimeout(() => {
+        showToast('Test email sent successfully (Simulated Local SMTP Relay)', 'success');
+        setIsTestingSmtp(false);
+      }, 1000);
+      return;
+    }
     try {
       const res = await fetch('/api/smtp/test', {
         method: 'POST',
@@ -3292,6 +3499,9 @@ int OnInit() {
 
   // Listen to socket updates for real-time sync
   useEffect(() => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      return; // Handled directly inside mockSocket emissions
+    }
     const socket = io();
     socket.on('audit_schedule:updated', (data: AuditSchedule) => {
       if (data) {
@@ -3322,23 +3532,36 @@ int OnInit() {
       return;
     }
     setIsSaving(true);
-    try {
-      const nextRunDate = new Date();
-      nextRunDate.setMonth(nextRunDate.getMonth() + 1);
-      nextRunDate.setDate(1);
-      nextRunDate.setHours(dispatchHour, 0, 0, 0);
-      const next_run_at = nextRunDate.toISOString();
+    const nextRunDate = new Date();
+    nextRunDate.setMonth(nextRunDate.getMonth() + 1);
+    nextRunDate.setDate(1);
+    nextRunDate.setHours(dispatchHour, 0, 0, 0);
+    const next_run_at = nextRunDate.toISOString();
 
+    const payloadSchedule = {
+      id: 'sch_1',
+      enabled: enabled ? 1 : 0,
+      recipients: recipients.trim(),
+      dispatch_hour: dispatchHour,
+      report_scope: reportScope,
+      next_run_at: enabled ? next_run_at : null
+    };
+
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      setTimeout(() => {
+        localStorage.setItem('mock_db_audit_schedule', JSON.stringify(payloadSchedule));
+        setSchedule(payloadSchedule);
+        showToast('Monthly audit schedule updated successfully (Local Session)', 'success');
+        setIsSaving(false);
+      }, 500);
+      return;
+    }
+
+    try {
       const res = await fetch('/api/audit-schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          enabled: enabled ? 1 : 0,
-          recipients: recipients.trim(),
-          dispatch_hour: dispatchHour,
-          report_scope: reportScope,
-          next_run_at: enabled ? next_run_at : null
-        })
+        body: JSON.stringify(payloadSchedule)
       });
 
       if (!res.ok) throw new Error('Failed to update schedule');
@@ -3361,10 +3584,27 @@ int OnInit() {
     }
     setIsSimulating(true);
     try {
-      // 1. Fetch events from server
-      const resEvents = await fetch('/api/events');
-      const eventsData = await resEvents.json();
-      const events: LicenseEvent[] = Array.isArray(eventsData) ? eventsData : [];
+      // 1. Fetch events
+      let events: LicenseEvent[] = [];
+      if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+        const mockEvents: LicenseEvent[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('mock_db_events_')) {
+            try {
+              const val = JSON.parse(localStorage.getItem(key) || '[]');
+              mockEvents.push(...val);
+            } catch (err) {
+              console.error(err);
+            }
+          }
+        }
+        events = mockEvents;
+      } else {
+        const resEvents = await fetch('/api/events');
+        const eventsData = await resEvents.json();
+        events = Array.isArray(eventsData) ? eventsData : [];
+      }
 
       // 2. Compile PDF via client-side jsPDF
       const doc = new jsPDF();

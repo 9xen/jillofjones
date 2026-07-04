@@ -7,7 +7,7 @@ import helmet from "helmet";
 import cors from "cors";
 import compression from "compression";
 import {
-  getAllLicenses, createLicense, updateLicenseStatus, deleteLicense, updateLicenseDetails, updateLicenseEarnings, getLicenseByKey, logLicenseEvent,
+  getAllLicenses, createLicense, updateLicenseStatus, deleteLicense, updateLicenseDetails, updateLicenseEarnings, getLicenseByKey, logLicenseEvent as rawLogLicenseEvent, getFailedVerificationsInLastHour,
   updateLicenseConfig, incrementApiCalls, batchUpdateLicenses,
   getAllClients, createClient, deleteClient, updateClient,
   getAllSoftwareProducts, createSoftwareProduct, deleteSoftwareProduct, updateSoftwareProduct,
@@ -23,7 +23,7 @@ import {
   checkSQLiteHealth, getLicenseEvents, getAllEvents
 } from "./src/db";
 import { updateUserPreferences } from "./src/db";
-import { License, AppUser, AuditLog } from "./src/types";
+import { License, AppUser, AuditLog, LicenseEvent } from "./src/types";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
@@ -189,6 +189,73 @@ async function notifyUsers(event: string, subject: string, text: string) {
       methods: ["GET", "POST"]
     }
   });
+
+  // Reusable Auto-Pause Evaluation logic
+  const runAutoPauseEvaluation = async () => {
+    try {
+      const autoPause = getSystemConfig("auto_pause_enabled") === "true";
+      if (!autoPause) return;
+
+      const scores = await calculateDuckDBRiskScores();
+      const licenses = getAllLicenses();
+
+      for (const license of licenses) {
+        if (license.status === 'active') {
+          const scoreData = scores[license.id];
+          if (scoreData && scoreData.risk_score > 90) {
+            updateLicenseStatus(license.id, 'suspended');
+            io.emit("licenses:status_updated", { id: license.id, status: 'suspended' });
+            
+            // Log the action with raw function to prevent event loop issues
+            rawLogLicenseEvent({
+              id: crypto.randomUUID(),
+              license_id: license.id,
+              event_type: 'suspension',
+              event_data: JSON.stringify({ reason: `Risk score exceeded 90 (${scoreData.risk_score})` }),
+              timestamp: new Date().toISOString()
+            });
+
+            logAction(null, 'auto_suspend', 'license', license.id, `License auto-suspended due to risk score ${scoreData.risk_score} > 90`);
+            io.emit("audit_logs:updated", getAllAuditLogs());
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Auto-pause evaluation error:", err);
+    }
+  };
+
+  // Wrapped logLicenseEvent for automated anomaly detection
+  const logLicenseEvent = (event: LicenseEvent) => {
+    // 1. Log event to SQLite database
+    rawLogLicenseEvent(event);
+
+    // 2. Automated Anomaly Detection
+    if (event.event_type === "verification_failed") {
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const failedCount = getFailedVerificationsInLastHour(event.license_id, oneHourAgo);
+
+      if (failedCount > 5) {
+        // Log high risk anomaly event
+        logAction(
+          null,
+          "anomaly_detected",
+          "license",
+          event.license_id,
+          `CRITICAL ANOMALY: License logged ${failedCount} failed verifications in the last hour. Triggering High-Risk flag.`
+        );
+
+        // Broadcast to clients so they can instantly update
+        io.emit("license:anomaly", { license_id: event.license_id, failed_count: failedCount });
+      }
+    }
+
+    // 3. Auto-Pause Instant Evaluation
+    const autoPause = getSystemConfig("auto_pause_enabled") === "true";
+    if (autoPause) {
+      runAutoPauseEvaluation().catch(err => console.error("Immediate auto-pause evaluation failed:", err));
+    }
+  };
 
   // Keep track of live WebSocket nodes
   const liveNodes = new Map<string, { 
@@ -1064,7 +1131,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     res.json({ enabled: enabled === "true" });
   });
 
-  app.post("/api/settings/auto-pause", (req, res) => {
+  app.post("/api/settings/auto-pause", async (req, res) => {
     try {
       const { enabled, user } = req.body;
       setSystemConfig("auto_pause_enabled", enabled ? "true" : "false");
@@ -1072,6 +1139,11 @@ async function notifyUsers(event: string, subject: string, text: string) {
 
       logAction(user || null, 'update_auto_pause', 'system_config', 'auto_pause_enabled', `Auto-Pause feature ${enabled ? 'enabled' : 'disabled'}`);
       
+      // If toggling on, evaluate instantly
+      if (enabled) {
+        await runAutoPauseEvaluation();
+      }
+
       res.json({ success: true, enabled });
     } catch (err) {
       console.error("Error setting auto-pause:", err);
@@ -1081,37 +1153,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
 
   // Auto-pause background task
   setInterval(async () => {
-    try {
-      const autoPause = getSystemConfig("auto_pause_enabled") === "true";
-      if (!autoPause) return;
-
-      const scores = await calculateDuckDBRiskScores();
-      const licenses = getAllLicenses();
-
-      for (const license of licenses) {
-        if (license.status === 'active') {
-          const scoreData = scores[license.id];
-          if (scoreData && scoreData.risk_score > 90) {
-            updateLicenseStatus(license.id, 'suspended');
-            io.emit("licenses:status_updated", { id: license.id, status: 'suspended' });
-            
-            // Log the action
-            logLicenseEvent({
-              id: crypto.randomUUID(),
-              license_id: license.id,
-              event_type: 'suspension',
-              event_data: JSON.stringify({ reason: `Risk score exceeded 90 (${scoreData.risk_score})` }),
-              timestamp: new Date().toISOString()
-            });
-
-            logAction(null, 'auto_suspend', 'license', license.id, `License auto-suspended due to risk score ${scoreData.risk_score} > 90`);
-            io.emit("audit_logs:updated", getAllAuditLogs());
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Auto-pause evaluation error:", err);
-    }
+    await runAutoPauseEvaluation();
   }, 10000);
 
   app.get("/api/settings/latency-threshold", (req, res) => {

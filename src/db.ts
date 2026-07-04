@@ -379,6 +379,17 @@ export function getAllEvents(): LicenseEvent[] {
   return db.prepare('SELECT * FROM license_events ORDER BY timestamp DESC LIMIT 100').all() as LicenseEvent[];
 }
 
+export function getFailedVerificationsInLastHour(licenseId: string, sinceISOString: string): number {
+  const row = db.prepare(`
+    SELECT COUNT(*) as count 
+    FROM license_events 
+    WHERE license_id = ? 
+      AND event_type = 'verification_failed' 
+      AND timestamp >= ?
+  `).get(licenseId, sinceISOString) as { count: number } | undefined;
+  return row ? row.count : 0;
+}
+
 // Client Database Operations
 export function getAllClients(): Client[] {
   return db.prepare('SELECT * FROM clients ORDER BY name ASC').all() as Client[];

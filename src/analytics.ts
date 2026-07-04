@@ -131,11 +131,15 @@ export interface RiskAnalysis {
   distinct_ips: number;
   distinct_hwids: number;
   risk_score: number;
+  failed_pings_last_hour: number;
+  high_risk_flag: boolean;
 }
 
 // Run DuckDB OLAP aggregation query to calculate the Security Risk Score
 export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAnalysis>> {
   await syncSQLiteToDuckDB();
+
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
   try {
     // Advanced analytical query using DuckDB functions
@@ -144,6 +148,7 @@ export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAn
         SELECT 
           license_id,
           COUNT(CASE WHEN event_type = 'verification_failed' THEN 1 END) as failed_pings,
+          COUNT(CASE WHEN event_type = 'verification_failed' AND timestamp >= ? THEN 1 END) as failed_pings_last_hour,
           COUNT(DISTINCT CASE WHEN event_type = 'verification_success' OR event_type = 'verification_failed' THEN 
             COALESCE(
               regexp_extract(event_data, '"ip":"([^"]+)"', 1),
@@ -162,18 +167,21 @@ export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAn
       SELECT 
         l.id as license_id,
         COALESCE(e.failed_pings, 0) as failed_pings,
+        COALESCE(e.failed_pings_last_hour, 0) as failed_pings_last_hour,
         COALESCE(e.distinct_ips, 0) as distinct_ips,
         COALESCE(e.distinct_hwids, 0) as distinct_hwids,
         l.status
       FROM licenses l
       LEFT JOIN EventStats e ON l.id = e.license_id
-    `);
+    `, [oneHourAgo]);
 
     const result: Record<string, RiskAnalysis> = {};
     for (const r of rows) {
       const failed_pings = Number(r.failed_pings || 0);
+      const failed_pings_last_hour = Number(r.failed_pings_last_hour || 0);
       const distinct_ips = Number(r.distinct_ips || 0);
       const distinct_hwids = Number(r.distinct_hwids || 0);
+      const high_risk_flag = failed_pings_last_hour > 5;
 
       // Risk Score calculation matrix
       let score = 0;
@@ -191,6 +199,11 @@ export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAn
         score += Math.min((distinct_hwids - 1) * 20, 35);
       }
 
+      // Add high risk flag penalty (forces a critical rating or adds major points)
+      if (high_risk_flag) {
+        score += 50; // Add 50 points penalty for brute-forcing / abnormal fails within 1h
+      }
+
       // Add license status impact
       if (r.status === 'revoked') {
         score += 50;
@@ -203,7 +216,9 @@ export async function calculateDuckDBRiskScores(): Promise<Record<string, RiskAn
         failed_pings: failed_pings,
         distinct_ips: distinct_ips,
         distinct_hwids: distinct_hwids,
-        risk_score: Math.min(score, 100)
+        risk_score: Math.min(score, 100),
+        failed_pings_last_hour: failed_pings_last_hour,
+        high_risk_flag: high_risk_flag
       };
     }
     return result;
