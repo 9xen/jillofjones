@@ -80,6 +80,11 @@ export interface SoftwareProduct {
   name: string;
   description: string;
   base_price: number;
+  version: string;
+  status: 'active' | 'deprecated' | 'beta';
+  release_date: string;
+  maintenance_window: string; // e.g., "02:00 UTC"
+  support_level: 'basic' | 'premium' | 'enterprise';
 }
 
 export interface LicenseTier {
@@ -90,6 +95,10 @@ export interface LicenseTier {
   api_calls_limit_monthly: number;
   api_calls_limit_yearly: number;
   description: string;
+  features: string; // JSON string array of active modules
+  sla_guarantee: string;
+  support_type: 'email' | 'chat' | 'dedicated';
+  custom_fields: string; // JSON string
 }
 
 export interface Fund {

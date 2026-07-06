@@ -1,5 +1,5 @@
 import duckdb from 'duckdb';
-import { getAllLicenses, getAllEvents, getAllAuditLogs } from './db';
+import { getAllLicenses, getAllEvents, getAllAuditLogs, getAllSoftwareProducts, getAllLicenseTiers } from './db';
 import { License, LicenseEvent, AuditLog } from './types';
 
 // Initialize embedded in-memory DuckDB database
@@ -71,6 +71,36 @@ export async function initializeDuckDBSchema() {
         timestamp VARCHAR
       );
     `);
+
+    await queryDuckDB(`
+      CREATE TABLE IF NOT EXISTS software_products (
+        id VARCHAR PRIMARY KEY,
+        name VARCHAR,
+        description VARCHAR,
+        base_price DOUBLE,
+        version VARCHAR,
+        status VARCHAR,
+        release_date VARCHAR,
+        maintenance_window VARCHAR,
+        support_level VARCHAR
+      );
+    `);
+
+    await queryDuckDB(`
+      CREATE TABLE IF NOT EXISTS license_tiers (
+        id VARCHAR PRIMARY KEY,
+        name VARCHAR,
+        max_volume_usd DOUBLE,
+        api_calls_limit INTEGER,
+        api_calls_limit_monthly INTEGER,
+        api_calls_limit_yearly INTEGER,
+        description VARCHAR,
+        features VARCHAR,
+        sla_guarantee VARCHAR,
+        support_type VARCHAR,
+        custom_fields VARCHAR
+      );
+    `);
     console.log("Embedded DuckDB schema initialized successfully.");
   } catch (err) {
     console.error("Failed to initialize DuckDB schema:", err);
@@ -83,11 +113,15 @@ export async function syncSQLiteToDuckDB() {
     const licenses = getAllLicenses();
     const events = getAllEvents();
     const logs = getAllAuditLogs();
+    const products = getAllSoftwareProducts();
+    const tiers = getAllLicenseTiers();
 
     // Clear old records in DuckDB
     await queryDuckDB('DELETE FROM licenses');
     await queryDuckDB('DELETE FROM license_events');
     await queryDuckDB('DELETE FROM audit_logs');
+    await queryDuckDB('DELETE FROM software_products');
+    await queryDuckDB('DELETE FROM license_tiers');
 
     // Batch insert into DuckDB
     for (const l of licenses) {
@@ -118,6 +152,22 @@ export async function syncSQLiteToDuckDB() {
         INSERT INTO audit_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         log.id, log.user_id, log.user_name, log.action, log.entity_type, log.entity_id, log.details, log.timestamp
+      ]);
+    }
+
+    for (const p of products) {
+      await queryDuckDB(`
+        INSERT INTO software_products VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        p.id, p.name, p.description, p.base_price, p.version, p.status, p.release_date, p.maintenance_window, p.support_level
+      ]);
+    }
+
+    for (const t of tiers) {
+      await queryDuckDB(`
+        INSERT INTO license_tiers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        t.id, t.name, t.max_volume_usd, t.api_calls_limit, t.api_calls_limit_monthly, t.api_calls_limit_yearly, t.description, t.features, t.sla_guarantee, t.support_type, t.custom_fields
       ]);
     }
   } catch (err) {

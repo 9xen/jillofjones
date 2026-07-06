@@ -29,8 +29,10 @@
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
     "hpp": "^0.2.3",
+    "json2csv": "^6.0.0-alpha.2",
     "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "nodemailer": "^9.0.3",
@@ -41,6 +43,7 @@
     "socket.io-client": "^4.8.3",
     "tailwind-merge": "^3.6.0",
     "vite": "^6.2.3",
+    "xlsx": "^0.18.5",
     "xss-clean": "^0.1.4"
   },
   "devDependencies": {

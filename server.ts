@@ -36,6 +36,9 @@ import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
 import { execSync } from "child_process";
 import { validateLicenseKeyFormat } from "./src/lib/licenseKeyUtils";
+import { Parser } from "json2csv";
+import { jsPDF } from "jspdf";
+import "jspdf-autotable";
 import { initializeDuckDBSchema, calculateDuckDBRiskScores, checkDuckDBHealth } from "./src/analytics";
 
 const JWT_SECRET = process.env.JWT_SECRET || 'quant-fund-super-secret-key-2026-override-this';
@@ -69,6 +72,7 @@ function verifyToken(req: any, res: any, next: any) {
 async function startServer() {
   await initializeDuckDBSchema();
   const app = express();
+  app.set('trust proxy', 1);
   const PORT = 3000;
   
   app.use(helmet({
@@ -1825,6 +1829,42 @@ async function notifyUsers(event: string, subject: string, text: string) {
       deleteLicenseTier(req.params.id);
       io.emit("license_tiers:deleted", req.params.id);
       res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/licenses/export/csv", (req, res) => {
+    try {
+      const licenses = getAllLicenses();
+      const parser = new Parser();
+      const csv = parser.parse(licenses);
+      res.header('Content-Type', 'text/csv');
+      res.attachment('licenses.csv');
+      res.send(csv);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/licenses/export/pdf", (req, res) => {
+    try {
+      const licenses = getAllLicenses();
+      const doc = new jsPDF();
+      
+      const tableData = licenses.map(l => [
+        l.id, l.software_name, l.tier, l.license_key, l.status, l.issued_to, l.created_at, l.expires_at
+      ]);
+      
+      (doc as any).autoTable({
+        head: [['ID', 'Software', 'Tier', 'Key', 'Status', 'Issued To', 'Created', 'Expires']],
+        body: tableData,
+      });
+      
+      const buffer = doc.output('arraybuffer');
+      res.header('Content-Type', 'application/pdf');
+      res.attachment('licenses.pdf');
+      res.send(Buffer.from(buffer));
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

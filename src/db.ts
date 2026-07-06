@@ -50,6 +50,23 @@ db.exec(`
   );
 `);
 
+// Migration: Add software_products columns if missing
+const spColumns = db.prepare("PRAGMA table_info(software_products)").all() as any[];
+const spColumnNames = spColumns.map(c => c.name);
+if (!spColumnNames.includes('version')) db.exec("ALTER TABLE software_products ADD COLUMN version TEXT DEFAULT '1.0.0'");
+if (!spColumnNames.includes('status')) db.exec("ALTER TABLE software_products ADD COLUMN status TEXT DEFAULT 'active'");
+if (!spColumnNames.includes('release_date')) db.exec("ALTER TABLE software_products ADD COLUMN release_date TEXT DEFAULT ''");
+if (!spColumnNames.includes('maintenance_window')) db.exec("ALTER TABLE software_products ADD COLUMN maintenance_window TEXT DEFAULT ''");
+if (!spColumnNames.includes('support_level')) db.exec("ALTER TABLE software_products ADD COLUMN support_level TEXT DEFAULT 'basic'");
+
+// Migration: Add license_tiers columns if missing
+const ltColumns = db.prepare("PRAGMA table_info(license_tiers)").all() as any[];
+const ltColumnNames = ltColumns.map(c => c.name);
+if (!ltColumnNames.includes('features')) db.exec("ALTER TABLE license_tiers ADD COLUMN features TEXT DEFAULT '[]'");
+if (!ltColumnNames.includes('sla_guarantee')) db.exec("ALTER TABLE license_tiers ADD COLUMN sla_guarantee TEXT DEFAULT 'none'");
+if (!ltColumnNames.includes('support_type')) db.exec("ALTER TABLE license_tiers ADD COLUMN support_type TEXT DEFAULT 'email'");
+if (!ltColumnNames.includes('custom_fields')) db.exec("ALTER TABLE license_tiers ADD COLUMN custom_fields TEXT DEFAULT '{}'");
+
 // Migration: Add billing_cycle if missing
 try {
   db.prepare("SELECT billing_cycle FROM licenses LIMIT 1").get();
@@ -107,8 +124,7 @@ db.exec(`
   );
 
   -- Create License Tiers table
-  DROP TABLE IF EXISTS license_tiers;
-  CREATE TABLE license_tiers (
+  CREATE TABLE IF NOT EXISTS license_tiers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     max_volume_usd REAL NOT NULL,
@@ -280,10 +296,20 @@ export function updateLicenseLastActive(id: string, last_ip: string): void {
 }
 
 export function updateLicenseDetails(id: string, updates: Partial<License>): void {
+  const allowedKeys = [
+    'software_name', 'tier', 'license_key', 'status', 'issued_to', 
+    'hardware_id', 'ip_whitelist', 'features', 'max_volume_usd', 
+    'api_calls_limit', 'api_calls_limit_monthly', 'api_calls_limit_yearly',
+    'api_calls_count_daily', 'api_calls_count_monthly', 'api_calls_count_yearly',
+    'expires_at', 'product_price', 'current_earnings', 'daily_earnings',
+    'weekly_earnings', 'monthly_earnings', 'last_active_ip', 
+    'device_fingerprint', 'asset_classes', 'restricted_accounts',
+    'billing_cycle', 'profit_share_pct'
+  ];
   const fields = [];
   const values = [];
   for (const [key, value] of Object.entries(updates)) {
-    if (key !== 'id' && key !== 'created_at' && key !== 'license_key') {
+    if (allowedKeys.includes(key)) {
       fields.push(`${key} = ?`);
       values.push(value);
     }
@@ -384,10 +410,15 @@ export function createClient(client: Client): Client {
 }
 
 export function updateClient(id: string, updates: Partial<Client>): void {
+  const allowedKeys = [
+    'name', 'email', 'mobile', 'address', 'extra_info', 
+    'kyc_status', 'company_registration_number', 'tax_id', 
+    'risk_rating', 'aml_status', 'kyc_notes'
+  ];
   const fields = [];
   const values = [];
   for (const [key, value] of Object.entries(updates)) {
-    if (key !== 'id' && key !== 'created_at') {
+    if (allowedKeys.includes(key)) {
       fields.push(`${key} = ?`);
       values.push(key === 'extra_info' && typeof value !== 'string' ? JSON.stringify(value) : value);
     }
@@ -409,18 +440,19 @@ export function getAllSoftwareProducts(): SoftwareProduct[] {
 
 export function createSoftwareProduct(product: SoftwareProduct): SoftwareProduct {
   const stmt = db.prepare(`
-    INSERT INTO software_products (id, name, description, base_price)
-    VALUES (@id, @name, @description, @base_price)
+    INSERT INTO software_products (id, name, description, base_price, version, status, release_date, maintenance_window, support_level)
+    VALUES (@id, @name, @description, @base_price, @version, @status, @release_date, @maintenance_window, @support_level)
   `);
   stmt.run(product);
   return product;
 }
 
 export function updateSoftwareProduct(id: string, updates: Partial<SoftwareProduct>): void {
+  const allowedKeys = ['name', 'description', 'base_price', 'version', 'status', 'release_date', 'maintenance_window', 'support_level'];
   const fields = [];
   const values = [];
   for (const [key, value] of Object.entries(updates)) {
-    if (key !== 'id' && key !== 'created_at') {
+    if (allowedKeys.includes(key)) {
       fields.push(`${key} = ?`);
       values.push(value);
     }
@@ -435,25 +467,38 @@ export function deleteSoftwareProduct(id: string): void {
   stmt.run(id);
 }
 
+export function getSoftwareProductById(id: string): SoftwareProduct | undefined {
+  return db.prepare('SELECT * FROM software_products WHERE id = ?').get(id) as SoftwareProduct | undefined;
+}
+
 // License Tier Database Operations
 export function getAllLicenseTiers(): LicenseTier[] {
   return db.prepare('SELECT * FROM license_tiers ORDER BY max_volume_usd ASC').all() as LicenseTier[];
 }
 
+export function getLicenseTierById(id: string): LicenseTier | undefined {
+  return db.prepare('SELECT * FROM license_tiers WHERE id = ?').get(id) as LicenseTier | undefined;
+}
+
 export function createLicenseTier(tier: LicenseTier): LicenseTier {
   const stmt = db.prepare(`
-    INSERT INTO license_tiers (id, name, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, description)
-    VALUES (@id, @name, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @description)
+    INSERT INTO license_tiers (id, name, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, description, features, sla_guarantee, support_type, custom_fields)
+    VALUES (@id, @name, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @description, @features, @sla_guarantee, @support_type, @custom_fields)
   `);
   stmt.run(tier);
   return tier;
 }
 
 export function updateLicenseTier(id: string, updates: Partial<LicenseTier>): void {
+  const allowedKeys = [
+    'name', 'max_volume_usd', 'api_calls_limit', 
+    'api_calls_limit_monthly', 'api_calls_limit_yearly', 'description',
+    'features', 'sla_guarantee', 'support_type', 'custom_fields'
+  ];
   const fields = [];
   const values = [];
   for (const [key, value] of Object.entries(updates)) {
-    if (key !== 'id' && key !== 'created_at') {
+    if (allowedKeys.includes(key)) {
       fields.push(`${key} = ?`);
       values.push(value);
     }
