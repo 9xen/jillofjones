@@ -9,7 +9,7 @@ export interface AuditLog {
   timestamp: string;
 }
 
-export type AppRole = 'Administrator' | 'Manager' | 'Auditor';
+export type AppRole = 'Administrator' | 'Manager' | 'User' | 'Viewer' | 'Auditor';
 
 export interface AppUser {
   id: string;
@@ -48,7 +48,8 @@ export interface License {
   device_fingerprint: string | null;
   asset_classes: string; // JSON string of allowed classes: ['forex', 'crypto', 'stocks']
   restricted_accounts: string; // JSON string of allowed account IDs or API keys
-  billing_cycle: 'monthly' | 'yearly' | 'onetime';
+  billing_cycle: 'monthly' | 'yearly' | 'onetime' | 'profit_share';
+  profit_share_pct?: number;
 }
 
 export interface LicenseEvent {
@@ -66,6 +67,12 @@ export interface Client {
   mobile: string;
   address: string;
   extra_info: string; // JSON string representing any custom field key-values
+  kyc_status?: 'pending' | 'approved' | 'rejected' | 'restricted';
+  company_registration_number?: string;
+  tax_id?: string;
+  risk_rating?: 'low' | 'medium' | 'high';
+  aml_status?: 'clear' | 'flagged';
+  kyc_notes?: string;
 }
 
 export interface SoftwareProduct {

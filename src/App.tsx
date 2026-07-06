@@ -2,12 +2,21 @@ import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { License, LicenseEvent, Fund, Client, SoftwareProduct, LicenseTier, AuditSchedule, AppUser, AppRole, AuditLog } from './types';
-import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronUp, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive } from 'lucide-react';
+import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronUp, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive, GripVertical, Calculator, DollarSign, BarChart3 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, RadialBarChart, RadialBar, PieChart, Pie, Cell } from 'recharts';
 import { LoginPage } from './components/LoginPage';
+import { ValidateKeyView } from './components/ValidateKeyView';
+import { generateSecureLicenseKey } from './lib/licenseKeyUtils';
+
+export const getLicenseFee = (license: License): number => {
+  if (license.billing_cycle === 'profit_share') {
+    return (license.monthly_earnings || 0) * (license.profit_share_pct ?? 15) / 100;
+  }
+  return license.product_price || 0;
+};
 
 export default function App() {
   const [licenses, setLicenses] = useState<License[]>([]);
@@ -15,6 +24,8 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [filterTier, setFilterTier] = useState<string>('all');
+  const [filterAssetClass, setFilterAssetClass] = useState<string>('all');
   const [visibleColumns, setVisibleColumns] = useState({
     license: true,
     software: true,
@@ -25,6 +36,7 @@ export default function App() {
   });
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [dateRange, setDateRange] = useState({ start: '', end: '', type: 'created_at' as 'created_at' | 'expires_at' });
+  const [showProfitShareCalc, setShowProfitShareCalc] = useState(false);
   const [selectedLicenses, setSelectedLicenses] = useState<Set<string>>(new Set());
 
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
@@ -98,7 +110,12 @@ export default function App() {
     localStorage.setItem('nonaxen_user', JSON.stringify(user));
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {
+      console.error('Logout error:', e);
+    }
     setCurrentUser(null);
     setIsAuthenticated(false);
     localStorage.removeItem('nonaxen_user');
@@ -130,10 +147,11 @@ export default function App() {
   };
 
   // RBAC Permission Helpers
-  const canManageLicenses = currentUser?.role === 'Administrator' || currentUser?.role === 'Manager';
+  const canManageLicenses = currentUser?.role === 'Administrator' || currentUser?.role === 'Manager' || currentUser?.role === 'User';
   const canManageSystem = currentUser?.role === 'Administrator';
-  const canViewAudit = !!currentUser; // All roles can see audit logs, but Auditor is read-only
-  const isReadOnly = currentUser?.role === 'Auditor';
+  const canDeleteLicenses = currentUser?.role === 'Administrator' || currentUser?.role === 'Manager';
+  const canViewAudit = !!currentUser;
+  const isReadOnly = currentUser?.role === 'Auditor' || currentUser?.role === 'Viewer';
   
   const toggleSelectAll = () => {
     if (selectedLicenses.size === filteredLicenses.length) {
@@ -765,7 +783,7 @@ export default function App() {
       id: crypto.randomUUID(),
       software_name: licenseData.software_name || 'QuantMaster Pro',
       tier: licenseData.tier || 'Standard',
-      license_key: Array.from({length: 4}, () => Math.random().toString(36).substring(2, 6).toUpperCase()).join('-'),
+      license_key: generateSecureLicenseKey(),
       status: 'active',
       issued_to: licenseData.issued_to || 'Unknown Entity',
       hardware_id: null,
@@ -789,7 +807,8 @@ export default function App() {
       device_fingerprint: null,
       asset_classes: '["forex"]',
       restricted_accounts: '[]',
-      billing_cycle: (licenseData.billing_cycle as 'monthly' | 'yearly' | 'onetime') || 'onetime',
+      billing_cycle: (licenseData.billing_cycle as 'monthly' | 'yearly' | 'onetime' | 'profit_share') || 'onetime',
+      profit_share_pct: licenseData.billing_cycle === 'profit_share' ? (licenseData.profit_share_pct ?? 15) : undefined,
     };
     socketRef.current.emit('licenses:create', { license: newLicense, user: currentUser });
     setIsCreateModalOpen(false);
@@ -885,15 +904,29 @@ export default function App() {
     const matchesSearch = l.issued_to.toLowerCase().includes(search.toLowerCase()) || 
                           l.license_key.toLowerCase().includes(search.toLowerCase()) ||
                           l.software_name.toLowerCase().includes(search.toLowerCase()) ||
+                          l.tier.toLowerCase().includes(search.toLowerCase()) ||
                           (l.hardware_id?.toLowerCase().includes(search.toLowerCase()) ?? false) ||
-                          (l.ip_whitelist?.toLowerCase().includes(search.toLowerCase()) ?? false);
+                          (l.ip_whitelist?.toLowerCase().includes(search.toLowerCase()) ?? false) ||
+                          (l.asset_classes?.toLowerCase().includes(search.toLowerCase()) ?? false);
     const matchesStatus = filterStatus === 'all' ? l.status !== 'archived' : l.status === filterStatus;
+    
+    const matchesTier = filterTier === 'all' || l.tier.toLowerCase() === filterTier.toLowerCase();
+    
+    let matchesAssetClass = true;
+    if (filterAssetClass !== 'all') {
+      try {
+        const classes = JSON.parse(l.asset_classes || '[]');
+        matchesAssetClass = Array.isArray(classes) && classes.some((c: string) => c.toLowerCase() === filterAssetClass.toLowerCase());
+      } catch (e) {
+        matchesAssetClass = false;
+      }
+    }
     
     const dateValue = new Date(l[dateRange.type]);
     const matchesDate = (!dateRange.start || dateValue >= new Date(dateRange.start)) &&
                         (!dateRange.end || dateValue <= new Date(dateRange.end));
     
-    return matchesSearch && matchesStatus && matchesDate;
+    return matchesSearch && matchesStatus && matchesTier && matchesAssetClass && matchesDate;
   }).sort((a, b) => {
     if (!sortConfig) return 0;
     const { key, direction } = sortConfig;
@@ -1011,6 +1044,10 @@ export default function App() {
             <Key className="w-4 h-4" />
             License Management
           </button>
+          <button onClick={() => { setActiveTab('validate_key'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'validate_key' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
+            <Check className="w-4 h-4" />
+            Validate Key
+          </button>
           {canManageSystem && (
             <button onClick={() => { setActiveTab('users'); setIsMobileMenuOpen(false); }} className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium text-sm transition-colors text-left border", activeTab === 'users' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 border-transparent")}>
               <Users className="w-4 h-4" />
@@ -1125,6 +1162,7 @@ export default function App() {
                 {activeTab === 'dashboard' && 'System Dashboard'}
                 {activeTab === 'licenses' && 'License Activity Console'}
                 {activeTab === 'users' && 'User Management'}
+                {activeTab === 'validate_key' && 'Validate License Key'}
                 {activeTab === 'funds' && 'Funds & Clients'}
                 {activeTab === 'products' && 'Software Products Catalog'}
                 {activeTab === 'tiers' && 'License Tiers Settings'}
@@ -1153,7 +1191,7 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <StatCard title="Active Trading Nodes" value={activeCount} icon={Server} color="text-indigo-400" bgColor="bg-indigo-500/10 border border-indigo-500/20" />
             <StatCard title="Total Client Earnings" value={`$${(licenses.reduce((acc, l) => acc + (l.current_earnings || 0), 0) / 1000).toFixed(1)}k`} icon={Activity} color="text-emerald-400" bgColor="bg-emerald-500/10 border border-emerald-500/20" />
-            <StatCard title="Total License Revenue" value={`$${(licenses.reduce((acc, l) => acc + (l.product_price || 0), 0) / 1000).toFixed(0)}k`} icon={Building} color="text-blue-400" bgColor="bg-blue-500/10 border border-blue-500/20" />
+            <StatCard title="Total License Revenue" value={`$${(licenses.reduce((acc, l) => acc + getLicenseFee(l), 0) / 1000).toFixed(0)}k`} icon={Building} color="text-blue-400" bgColor="bg-blue-500/10 border border-blue-500/20" />
             <StatCard title="Suspended/Revoked" value={revokedCount + licenses.filter(l => l.status === 'suspended').length} icon={ShieldAlert} color="text-rose-400" bgColor="bg-rose-500/10 border border-rose-500/20" />
           </div>
         )}
@@ -1183,14 +1221,54 @@ export default function App() {
             <input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-xs text-zinc-300 font-mono focus:outline-none" />
           </div>
 
-          {canManageLicenses && (
-            <button 
-              onClick={() => setIsCreateModalOpen(true)}
-              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Tier</span>
+            <select 
+              value={filterTier} 
+              onChange={e => setFilterTier(e.target.value)} 
+              className="bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-2 text-xs text-zinc-300 font-mono focus:outline-none focus:border-indigo-500 cursor-pointer"
             >
-              <Plus className="w-4 h-4" />
-              New License
-            </button>
+              <option value="all">All Tiers</option>
+              {licenseTiers.map(t => (
+                <option key={t.id} value={t.name}>{t.name}</option>
+              ))}
+              {!licenseTiers.some(t => t.name.toLowerCase() === 'standard') && <option value="Standard">Standard</option>}
+              {!licenseTiers.some(t => t.name.toLowerCase() === 'professional') && <option value="Professional">Professional</option>}
+              {!licenseTiers.some(t => t.name.toLowerCase() === 'enterprise') && <option value="Enterprise">Enterprise</option>}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Asset</span>
+            <select 
+              value={filterAssetClass} 
+              onChange={e => setFilterAssetClass(e.target.value)} 
+              className="bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-2 text-xs text-zinc-300 font-mono focus:outline-none focus:border-indigo-500 cursor-pointer"
+            >
+              <option value="all">All Assets</option>
+              <option value="forex">Forex</option>
+              <option value="crypto">Crypto</option>
+              <option value="stocks">Stocks</option>
+            </select>
+          </div>
+
+          {canManageLicenses && (
+            <>
+              <button 
+                onClick={() => setShowProfitShareCalc(true)}
+                className="flex items-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                <Calculator className="w-4 h-4" />
+                Profit Share Calculator
+              </button>
+              <button 
+                onClick={() => setIsCreateModalOpen(true)}
+                className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                New License
+              </button>
+            </>
           )}
 
           <div className="flex bg-zinc-950 p-1 rounded-lg ml-auto border border-zinc-800">
@@ -1248,8 +1326,53 @@ export default function App() {
           })()
         )}
 
+        {/* Card View (Mobile) */}
+        <div className="md:hidden space-y-4">
+          {filteredLicenses.map((license) => {
+            const scoreDetails = duckDBRiskScores[license.id];
+            const score = scoreDetails ? scoreDetails.risk_score : calculateRiskScore(license);
+            const Icon = score <= 30 ? ShieldCheck : score <= 70 ? Shield : ShieldAlert;
+            const textColor = score <= 30 ? "text-emerald-500" : score <= 70 ? "text-amber-500" : "text-rose-500";
+            return (
+              <div key={license.id} className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-4 space-y-3" onClick={() => setSelectedLicense(license)}>
+                <div className="flex justify-between items-start">
+                  <div className="flex flex-col">
+                    <span className="font-mono text-zinc-200">{license.license_key}</span>
+                    <span className="text-zinc-400 text-xs">{license.software_name}</span>
+                  </div>
+                  <StatusBadge status={license.status} />
+                </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-zinc-500">Earnings:</span>
+                  <span className="text-emerald-400 font-mono">${(license.current_earnings || 0).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-zinc-500">Risk Score:</span>
+                  <div className="flex items-center gap-1">
+                    <Icon className={cn("w-4 h-4", textColor)} />
+                    <span className={cn("font-mono font-bold", textColor)}>{score}</span>
+                  </div>
+                </div>
+                <div className="pt-2 border-t border-zinc-800 flex justify-end gap-2">
+                    <button onClick={(e) => { e.stopPropagation(); simulatePing(license); }} className="p-2 text-zinc-400 hover:text-indigo-400 bg-zinc-950 rounded border border-zinc-800" title="Simulate Bot Ping">
+                      <Send className="w-4 h-4" />
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); openEvents(license); }} className="p-2 text-zinc-400 hover:text-indigo-400 bg-zinc-950 rounded border border-zinc-800" title="View Audit Logs & Events">
+                      <List className="w-4 h-4" />
+                    </button>
+                    {canManageLicenses && (
+                      <button onClick={(e) => { e.stopPropagation(); setRenewingLicense(license); setIsRenewModalOpen(true); }} className="p-2 text-zinc-400 hover:text-indigo-400 bg-zinc-950 rounded border border-zinc-800" title="Renew">
+                        <RefreshCw className="w-4 h-4" />
+                      </button>
+                    )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
         {/* Table */}
-        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
+        <div className="hidden md:block bg-zinc-900/30 border border-zinc-800/80 rounded-xl overflow-hidden backdrop-blur-sm">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm whitespace-nowrap">
               <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400">
@@ -1367,8 +1490,12 @@ export default function App() {
                                 <Building className="w-3 h-3 text-zinc-600" />
                                 {license.issued_to}
                               </span>
-                              <span className="text-emerald-500 text-[10px] font-mono mt-1.5 bg-emerald-500/10 px-1.5 py-0.5 rounded w-fit border border-emerald-500/20">
-                                FEE: ${license.product_price?.toLocaleString()}
+                              <span className="text-emerald-400 text-[10px] font-mono mt-1.5 bg-emerald-500/10 px-1.5 py-0.5 rounded w-fit border border-emerald-500/20 animate-pulse">
+                                {license.billing_cycle === 'profit_share' ? (
+                                  `FEE: ${license.profit_share_pct ?? 15}% PROFIT SHARE ($${getLicenseFee(license).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}/mo)`
+                                ) : (
+                                  `FEE: $${license.product_price?.toLocaleString()}`
+                                )}
                               </span>
                             </div>
                           </td>
@@ -1567,9 +1694,11 @@ export default function App() {
                                 }} className="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors border border-transparent hover:border-indigo-500/20" title="Edit details">
                                   <SlidersHorizontal className="w-4 h-4" />
                                 </button>
-                                <button onClick={(e) => { e.stopPropagation(); deleteLicense(license.id); }} className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors border border-transparent hover:border-rose-500/20" title="Delete">
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
+                                {canDeleteLicenses && (
+                                  <button onClick={(e) => { e.stopPropagation(); deleteLicense(license.id); }} className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors border border-transparent hover:border-rose-500/20" title="Delete">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                )}
                               </>
                             )}
                           </div>
@@ -1664,6 +1793,7 @@ export default function App() {
             renewalAlerts={renewalAlerts}
             showToast={showToast}
             riskSnapshots={riskSnapshots}
+            clients={clients}
           />
         )}
         {activeTab === 'audit_logs' && <AuditLogsView logs={auditLogs} />}
@@ -1685,6 +1815,7 @@ export default function App() {
             }}
           />
         )}
+        {activeTab === 'validate_key' && <ValidateKeyView />}
         {activeTab === 'funds' && (
           <FundsView 
             clients={clients} 
@@ -1868,6 +1999,11 @@ export default function App() {
       />
 
       {/* Create License Modal */}
+      <ProfitShareCalculatorModal 
+        isOpen={showProfitShareCalc}
+        onClose={() => setShowProfitShareCalc(false)}
+        licenses={licenses}
+      />
       <CreateLicenseModal 
         isOpen={isCreateModalOpen} 
         onClose={() => { setIsCreateModalOpen(false); setEditingMainLicense(null); }} 
@@ -1919,6 +2055,22 @@ export default function App() {
 }
 
 function AuditLogsView({ logs }: { logs: AuditLog[] }) {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterType, setFilterType] = useState('all');
+  
+  const filteredLogs = logs.filter(log => {
+    const search = searchTerm.toLowerCase();
+    const matchesSearch = (
+      (log.user_name && log.user_name.toLowerCase().includes(search)) ||
+      (log.action && log.action.toLowerCase().includes(search)) ||
+      (log.entity_type && log.entity_type.toLowerCase().includes(search)) ||
+      (log.details && log.details.toLowerCase().includes(search)) ||
+      (new Date(log.timestamp).toLocaleString().toLowerCase().includes(search))
+    );
+    const matchesType = filterType === 'all' || (filterType === 'compliance' && log.action.includes('compliance_webhook'));
+    return matchesSearch && matchesType;
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -1928,9 +2080,29 @@ function AuditLogsView({ logs }: { logs: AuditLog[] }) {
           </h3>
           <p className="text-xs text-zinc-500 font-mono mt-1">Real-time ledger of all organizational administrative actions</p>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded text-[10px] font-mono text-zinc-400">
-          <Database className="w-3 h-3" />
-          PERSISTED IN DUCKDB
+        <div className="flex items-center gap-4">
+          <select
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value)}
+            className="px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-md text-sm text-zinc-200 focus:outline-none focus:border-indigo-500/50"
+          >
+            <option value="all">All Logs</option>
+            <option value="compliance">Compliance Only</option>
+          </select>
+          <div className="relative">
+            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input 
+              type="text"
+              placeholder="Search audit logs..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-9 pr-4 py-1.5 bg-zinc-900 border border-zinc-800 rounded-md text-sm text-zinc-200 focus:outline-none focus:border-indigo-500/50 w-64"
+            />
+          </div>
+          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded text-[10px] font-mono text-zinc-400">
+            <Database className="w-3 h-3" />
+            PERSISTED IN DUCKDB
+          </div>
         </div>
       </div>
 
@@ -1947,7 +2119,7 @@ function AuditLogsView({ logs }: { logs: AuditLog[] }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
-              {logs.map((log) => (
+              {filteredLogs.map((log) => (
                 <tr key={log.id} className="hover:bg-zinc-800/30 group transition-colors">
                   <td className="px-6 py-4 text-zinc-500 font-mono text-[10px]">
                     {new Date(log.timestamp).toLocaleString()}
@@ -1979,10 +2151,10 @@ function AuditLogsView({ logs }: { logs: AuditLog[] }) {
                   </td>
                 </tr>
               ))}
-              {logs.length === 0 && (
+              {filteredLogs.length === 0 && (
                 <tr>
                   <td colSpan={5} className="px-6 py-12 text-center text-zinc-500 font-mono text-xs uppercase tracking-widest">
-                    No records found in audit ledger
+                    {searchTerm ? "No records match search" : "No records found in audit ledger"}
                   </td>
                 </tr>
               )}
@@ -2019,7 +2191,7 @@ function UsersView({
     setIsInviteOpen(false);
   };
 
-  const roles: AppRole[] = ['Administrator', 'Manager', 'Auditor'];
+  const roles: AppRole[] = ['Administrator', 'Manager', 'User', 'Viewer', 'Auditor'];
 
   return (
     <div className="space-y-4">
@@ -2150,7 +2322,13 @@ function FundsView({
     email: '', 
     mobile: '', 
     address: '',
-    extra_info: '' 
+    extra_info: '',
+    kyc_status: 'pending' as 'pending' | 'approved' | 'rejected' | 'restricted',
+    company_registration_number: '',
+    tax_id: '',
+    risk_rating: 'low' as 'low' | 'medium' | 'high',
+    aml_status: 'clear' as 'clear' | 'flagged',
+    kyc_notes: ''
   });
   
   const [editingClient, setEditingClient] = useState<Client | null>(null);
@@ -2184,28 +2362,46 @@ function FundsView({
       }
     });
 
-    addClient({
+    const payload = {
       name: formData.name,
       email: formData.email,
       mobile: formData.mobile,
       address: formData.address,
-      extra_info: JSON.stringify(extraInfoObj)
-    });
+      extra_info: JSON.stringify(extraInfoObj),
+      kyc_status: formData.kyc_status,
+      company_registration_number: formData.company_registration_number,
+      tax_id: formData.tax_id,
+      risk_rating: formData.risk_rating,
+      aml_status: formData.aml_status,
+      kyc_notes: formData.kyc_notes
+    };
 
-    setFormData({ name: '', email: '', mobile: '', address: '', extra_info: '' });
+    if (editingClient) {
+      editClient(editingClient.id, payload);
+      showToast('Client updated successfully', 'success');
+    } else {
+      addClient(payload);
+      showToast('Client added successfully', 'success');
+    }
+
+    setFormData({ 
+      name: '', email: '', mobile: '', address: '', extra_info: '',
+      kyc_status: 'pending', company_registration_number: '', tax_id: '',
+      risk_rating: 'low', aml_status: 'clear', kyc_notes: ''
+    });
     setExtraFields([
       { key: 'AUM Tier', value: 'Over $50M' },
       { key: 'Jurisdiction', value: 'Cayman Islands' }
     ]);
     setIsModalOpen(false);
-    showToast('Client added successfully', 'success');
+    setEditingClient(null);
   };
 
   const getClientStats = (name: string) => {
     const relevantLicenses = licenses.filter(l => l.issued_to === name);
     return {
       count: relevantLicenses.filter(l => l.status === 'active').length,
-      value: relevantLicenses.reduce((acc, l) => acc + (l.product_price || 0), 0)
+      value: relevantLicenses.reduce((acc, l) => acc + getLicenseFee(l), 0)
     };
   };
   
@@ -2257,6 +2453,55 @@ function FundsView({
             </div>
 
             <div className="border-t border-zinc-800 pt-4 mt-2">
+              <span className="block text-[10px] font-mono text-zinc-400 uppercase mb-3">Enterprise KYC & Compliance</span>
+              
+              <div className="grid grid-cols-2 gap-4 mb-3">
+                <div>
+                  <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">KYC Status</label>
+                  <select value={formData.kyc_status} onChange={e => setFormData({...formData, kyc_status: e.target.value as any})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors">
+                    <option value="pending">Pending Review</option>
+                    <option value="approved">Approved</option>
+                    <option value="rejected">Rejected</option>
+                    <option value="restricted">Restricted / Watchlist</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">AML Status</label>
+                  <select value={formData.aml_status} onChange={e => setFormData({...formData, aml_status: e.target.value as any})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors">
+                    <option value="clear">Clear (No Match)</option>
+                    <option value="flagged">Flagged (Review Required)</option>
+                  </select>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4 mb-3">
+                <div>
+                  <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Company Reg Number (LEI)</label>
+                  <input type="text" value={formData.company_registration_number} onChange={e => setFormData({...formData, company_registration_number: e.target.value})} placeholder="e.g. 5493006MHB84DD0ZWV18" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors font-mono" />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Tax ID / EIN</label>
+                  <input type="text" value={formData.tax_id} onChange={e => setFormData({...formData, tax_id: e.target.value})} placeholder="e.g. 12-3456789" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors font-mono" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Risk Rating</label>
+                  <select value={formData.risk_rating} onChange={e => setFormData({...formData, risk_rating: e.target.value as any})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors">
+                    <option value="low">Low Risk</option>
+                    <option value="medium">Medium Risk</option>
+                    <option value="high">High Risk</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Compliance Notes</label>
+                  <input type="text" value={formData.kyc_notes} onChange={e => setFormData({...formData, kyc_notes: e.target.value})} placeholder="Internal auditor notes..." className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-xs focus:outline-none focus:border-indigo-500 transition-colors" />
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-zinc-800 pt-4 mt-2">
               <div className="flex justify-between items-center mb-3">
                 <span className="block text-[10px] font-mono text-zinc-400 uppercase">Custom Attributes / Metadata</span>
                 <button type="button" onClick={addExtraField} className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1">+ Add Attribute</button>
@@ -2287,6 +2532,7 @@ function FundsView({
             <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
               <tr>
                 <th className="px-6 py-4">Client / Fund Name</th>
+                <th className="px-6 py-4">KYC Status</th>
                 <th className="px-6 py-4">Contact Details</th>
                 <th className="px-6 py-4">Registered Address</th>
                 <th className="px-6 py-4">Metadata attributes</th>
@@ -2308,6 +2554,32 @@ function FundsView({
                     <td className="px-6 py-4 text-zinc-200 font-semibold flex items-center gap-2 text-sm font-sans">
                       <Building className="w-4 h-4 text-zinc-500 group-hover:text-indigo-400 transition-colors"/>
                       {cli.name}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex flex-col items-start gap-1">
+                        <span className={cn(
+                          "text-[10px] px-1.5 py-0.5 rounded font-mono uppercase font-bold tracking-wider",
+                          cli.kyc_status === 'approved' ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400" :
+                          cli.kyc_status === 'rejected' ? "bg-rose-500/10 border border-rose-500/20 text-rose-400" :
+                          cli.kyc_status === 'restricted' ? "bg-amber-500/10 border border-amber-500/20 text-amber-400" :
+                          "bg-zinc-500/10 border border-zinc-500/20 text-zinc-400"
+                        )}>
+                          {cli.kyc_status || 'PENDING'}
+                        </span>
+                        {cli.risk_rating && cli.risk_rating !== 'low' && (
+                          <span className={cn(
+                            "text-[8px] px-1 rounded font-mono uppercase",
+                            cli.risk_rating === 'high' ? "text-rose-400 bg-rose-500/10" : "text-amber-400 bg-amber-500/10"
+                          )}>
+                            {cli.risk_rating} risk
+                          </span>
+                        )}
+                        {cli.aml_status === 'flagged' && (
+                          <span className="text-[8px] px-1 rounded font-mono uppercase text-rose-400 bg-rose-500/10 border border-rose-500/20">
+                            AML FLAGGED
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-4 text-zinc-300 font-mono text-xs">
                       <div>{cli.email || 'N/A'}</div>
@@ -2338,7 +2610,13 @@ function FundsView({
                             email: cli.email,
                             mobile: cli.mobile,
                             address: cli.address || '',
-                            extra_info: ''
+                            extra_info: '',
+                            kyc_status: cli.kyc_status || 'pending',
+                            company_registration_number: cli.company_registration_number || '',
+                            tax_id: cli.tax_id || '',
+                            risk_rating: cli.risk_rating || 'low',
+                            aml_status: cli.aml_status || 'clear',
+                            kyc_notes: cli.kyc_notes || ''
                           });
                           if (cli.extra_info) {
                             try {
@@ -2805,9 +3083,10 @@ function NodesView({
                               "text-[8px] px-1.5 py-0.5 rounded font-mono uppercase font-bold tracking-wider",
                               l.billing_cycle === 'monthly' ? "bg-cyan-500/10 border border-cyan-500/20 text-cyan-400" :
                               l.billing_cycle === 'yearly' ? "bg-amber-500/10 border border-amber-500/20 text-amber-400" :
+                              l.billing_cycle === 'profit_share' ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 animate-pulse" :
                               "bg-indigo-500/10 border border-indigo-500/20 text-indigo-400"
                             )}>
-                              {l.billing_cycle === 'onetime' ? 'lifetime' : l.billing_cycle}
+                              {l.billing_cycle === 'onetime' ? 'lifetime' : l.billing_cycle === 'profit_share' ? `profit share (${l.profit_share_pct ?? 15}%)` : l.billing_cycle}
                             </span>
                           )}
                         </div>
@@ -5259,6 +5538,101 @@ function LicenseTiersView({
   );
 }
 
+function ProfitShareCalculatorModal({ isOpen, onClose, licenses }: { isOpen: boolean, onClose: () => void, licenses: License[] }) {
+  const [avgNodeProfit, setAvgNodeProfit] = useState<number>(50000);
+
+  if (!isOpen) return null;
+
+  const profitShareLicenses = licenses.filter(l => l.billing_cycle === 'profit_share' && l.status === 'active');
+  
+  const projectedRevenuePerMonth = profitShareLicenses.reduce((acc, l) => {
+    return acc + (avgNodeProfit * ((l.profit_share_pct || 15) / 100));
+  }, 0);
+
+  const avgPct = profitShareLicenses.length > 0 
+    ? profitShareLicenses.reduce((acc, l) => acc + (l.profit_share_pct || 15), 0) / profitShareLicenses.length 
+    : 0;
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl">
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/50">
+          <div className="flex items-center gap-2">
+            <Calculator className="w-5 h-5 text-indigo-400" />
+            <h2 className="text-sm font-semibold text-zinc-100">Profit Share Projections</h2>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6">
+          <p className="text-xs text-zinc-400 mb-6">
+            Calculate hypothetical future license earnings across all active hedge fund profit share licenses.
+          </p>
+
+          <div className="bg-zinc-900/50 p-5 rounded-xl border border-zinc-800/80 mb-6">
+            <div className="flex justify-between items-end mb-4">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase tracking-wider mb-1">
+                  Avg. Monthly Trading Profit (Per Node)
+                </label>
+                <div className="text-2xl font-semibold text-zinc-200">
+                  ${avgNodeProfit.toLocaleString()}
+                </div>
+              </div>
+            </div>
+            
+            <input 
+              type="range" 
+              min="1000" 
+              max="500000" 
+              step="1000"
+              value={avgNodeProfit}
+              onChange={(e) => setAvgNodeProfit(Number(e.target.value))}
+              className="w-full accent-indigo-500 h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
+            />
+            <div className="flex justify-between text-[10px] font-mono text-zinc-500 mt-2">
+              <span>$1k</span>
+              <span>$250k</span>
+              <span>$500k</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mb-6">
+            <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800/50">
+              <span className="block text-[10px] font-mono text-zinc-500 uppercase tracking-wider mb-1">Active PS Licenses</span>
+              <div className="text-xl font-semibold text-zinc-200">{profitShareLicenses.length}</div>
+            </div>
+            <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800/50">
+              <span className="block text-[10px] font-mono text-zinc-500 uppercase tracking-wider mb-1">Avg. Profit Share %</span>
+              <div className="text-xl font-semibold text-emerald-400">{avgPct.toFixed(1)}%</div>
+            </div>
+          </div>
+
+          <div className="bg-indigo-500/10 p-5 rounded-xl border border-indigo-500/20">
+            <span className="block text-[10px] font-mono text-indigo-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+              <BarChart3 className="w-3.5 h-3.5" />
+              Projected License Revenue
+            </span>
+            <div className="flex items-end gap-3">
+              <span className="text-4xl font-bold text-indigo-400">${projectedRevenuePerMonth.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+              <span className="text-xs font-mono text-zinc-400 mb-1.5">/ month</span>
+            </div>
+            <div className="mt-2 text-xs font-mono text-zinc-500">
+              ${(projectedRevenuePerMonth * 12).toLocaleString(undefined, { maximumFractionDigits: 0 })} / year
+            </div>
+          </div>
+        </div>
+        <div className="p-4 border-t border-zinc-800 bg-zinc-950/30 flex justify-end">
+          <button onClick={onClose} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors">
+            Close Calculator
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CreateLicenseModal({ 
   isOpen, 
   onClose, 
@@ -5280,7 +5654,8 @@ function CreateLicenseModal({
     issued_to: '',
     software_name: '',
     tier: '',
-    billing_cycle: 'onetime' as 'monthly' | 'yearly' | 'onetime'
+    billing_cycle: 'onetime' as 'monthly' | 'yearly' | 'onetime' | 'profit_share',
+    profit_share_pct: 15
   });
 
   useEffect(() => {
@@ -5289,10 +5664,11 @@ function CreateLicenseModal({
         issued_to: clients[0]?.name || '',
         software_name: softwareProducts[0]?.name || 'QuantMaster HFT',
         tier: licenseTiers[0]?.name || 'Professional',
-        billing_cycle: 'onetime'
+        billing_cycle: editingLicense?.billing_cycle || 'onetime',
+        profit_share_pct: editingLicense?.profit_share_pct || 15
       });
     }
-  }, [isOpen, clients, softwareProducts, licenseTiers]);
+  }, [isOpen, clients, softwareProducts, licenseTiers, editingLicense]);
 
   if (!isOpen) return null;
 
@@ -5381,8 +5757,29 @@ function CreateLicenseModal({
               <option value="onetime">One-time / Lifetime</option>
               <option value="monthly">Monthly Subscription</option>
               <option value="yearly">Yearly Subscription</option>
+              <option value="profit_share">Hedge Fund (% of Monthly Profit Share)</option>
             </select>
           </div>
+          {formData.billing_cycle === 'profit_share' && (
+            <div>
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Monthly Profit Share Percentage (%)</label>
+              <div className="relative flex items-center">
+                <input 
+                  type="number" 
+                  min="1" 
+                  max="100"
+                  value={formData.profit_share_pct}
+                  onChange={e => setFormData({...formData, profit_share_pct: parseFloat(e.target.value) || 0})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-3 pr-28 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono"
+                  placeholder="e.g. 15"
+                />
+                <span className="absolute right-3 text-xs font-mono text-zinc-500 pointer-events-none">% of Monthly Profit</span>
+              </div>
+              <p className="text-[10px] text-zinc-500 font-mono mt-1">
+                License fee will be dynamically calculated every month based on this percentage of simulated node trading profits.
+              </p>
+            </div>
+          )}
         </div>
         <div className="p-4 border-t border-zinc-800 bg-zinc-950/30 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-zinc-200 transition-colors">Cancel</button>
@@ -5502,7 +5899,7 @@ function EditNodeConfigModal({
             <p className="text-[10px] font-mono text-zinc-500 mt-0.5">
               License: {license.issued_to} ({license.license_key.substring(0, 12)}...)
               {license.billing_cycle && (
-                <span className="text-indigo-400 capitalize ml-1">({license.billing_cycle === 'onetime' ? 'lifetime' : license.billing_cycle})</span>
+                <span className="text-indigo-400 capitalize ml-1">({license.billing_cycle === 'onetime' ? 'lifetime' : license.billing_cycle === 'profit_share' ? `profit share (${license.profit_share_pct ?? 15}%)` : license.billing_cycle})</span>
               )}
             </p>
           </div>
@@ -5647,18 +6044,119 @@ function EditNodeConfigModal({
   );
 }
 
-function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showToast, riskSnapshots }: { 
+function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showToast, riskSnapshots, clients }: { 
   licenses: License[], 
   riskScores: Record<string, any>,
   riskAlerts: any[],
   renewalAlerts: any[],
   showToast: (msg: string, type: 'success'|'error') => void,
-  riskSnapshots: any[]
+  riskSnapshots: any[],
+  clients: Client[]
 }) {
-  const currentRevenue = licenses.reduce((acc, l) => acc + (l.product_price || 0), 0);
+  const currentRevenue = licenses.reduce((acc, l) => acc + getLicenseFee(l), 0);
   const currentActive = licenses.filter(l => l.status === 'active').length;
   const [generating, setGenerating] = useState(false);
   const [dbHealth, setDbHealth] = useState<any>(null);
+
+  // Drag and drop customizable widget state
+  const [widgets, setWidgets] = useState<{ id: string; title: string; visible: boolean; size: string }[]>(() => {
+    const saved = localStorage.getItem('dashboard_widgets_v1');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const ids = parsed.map(w => w.id);
+          const defaults = [
+            { id: 'system_health', title: 'System Integrity & Posture', visible: true, size: 'lg:col-span-2' },
+            { id: 'risk_distribution', title: 'Risk Distribution', visible: true, size: 'lg:col-span-1' },
+            { id: 'historical_risk', title: 'Historical Risk & Telemetry', visible: true, size: 'lg:col-span-3' },
+            { id: 'revenue_trend', title: 'Revenue Trend', visible: true, size: 'lg:col-span-2' },
+            { id: 'active_nodes', title: 'Active Node Status', visible: true, size: 'lg:col-span-1' },
+            { id: 'alert_logs', title: 'Alert Logs', visible: true, size: 'lg:col-span-1' },
+            { id: 'db_diagnostic', title: 'Database Diagnostics', visible: true, size: 'lg:col-span-2' },
+            { id: 'pending_kyc', title: 'Pending KYC Reviews', visible: true, size: 'lg:col-span-1' },
+            { id: 'top_clients', title: 'Top Clients & Nodes', visible: true, size: 'lg:col-span-2' },
+          ];
+          const missing = defaults.filter(d => !ids.includes(d.id));
+          return [...parsed, ...missing];
+        }
+      } catch (e) {
+        // fallback
+      }
+    }
+    return [
+      { id: 'system_health', title: 'System Integrity & Posture', visible: true, size: 'lg:col-span-2' },
+      { id: 'risk_distribution', title: 'Risk Distribution', visible: true, size: 'lg:col-span-1' },
+      { id: 'historical_risk', title: 'Historical Risk & Telemetry', visible: true, size: 'lg:col-span-3' },
+      { id: 'revenue_trend', title: 'Revenue Trend', visible: true, size: 'lg:col-span-2' },
+      { id: 'active_nodes', title: 'Active Node Status', visible: true, size: 'lg:col-span-1' },
+      { id: 'alert_logs', title: 'Alert Logs', visible: true, size: 'lg:col-span-1' },
+      { id: 'db_diagnostic', title: 'Database Diagnostics', visible: true, size: 'lg:col-span-2' },
+      { id: 'pending_kyc', title: 'Pending KYC Reviews', visible: true, size: 'lg:col-span-1' },
+      { id: 'top_clients', title: 'Top Clients & Nodes', visible: true, size: 'lg:col-span-2' },
+    ];
+  });
+
+  const [isCustomizing, setIsCustomizing] = useState(false);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem('dashboard_widgets_v1', JSON.stringify(widgets));
+  }, [widgets]);
+
+  const handleDragStart = (e: React.DragEvent, id: string) => {
+    setDraggedId(id);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e: React.DragEvent, id: string) => {
+    e.preventDefault();
+    if (draggedId && draggedId !== id) {
+      setDragOverId(id);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    if (!draggedId || draggedId === targetId) return;
+
+    const draggedIdx = widgets.findIndex(w => w.id === draggedId);
+    const targetIdx = widgets.findIndex(w => w.id === targetId);
+
+    if (draggedIdx !== -1 && targetIdx !== -1) {
+      const updated = [...widgets];
+      const [moved] = updated.splice(draggedIdx, 1);
+      updated.splice(targetIdx, 0, moved);
+      setWidgets(updated);
+    }
+    setDraggedId(null);
+    setDragOverId(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedId(null);
+    setDragOverId(null);
+  };
+
+  const toggleWidgetVisibility = (id: string) => {
+    setWidgets(prev => prev.map(w => w.id === id ? { ...w, visible: !w.visible } : w));
+  };
+
+  const resetWidgets = () => {
+    setWidgets([
+      { id: 'system_health', title: 'System Integrity & Posture', visible: true, size: 'lg:col-span-2' },
+      { id: 'risk_distribution', title: 'Risk Distribution', visible: true, size: 'lg:col-span-1' },
+      { id: 'historical_risk', title: 'Historical Risk & Telemetry', visible: true, size: 'lg:col-span-3' },
+      { id: 'revenue_trend', title: 'Revenue Trend', visible: true, size: 'lg:col-span-2' },
+      { id: 'active_nodes', title: 'Active Node Status', visible: true, size: 'lg:col-span-1' },
+      { id: 'alert_logs', title: 'Alert Logs', visible: true, size: 'lg:col-span-1' },
+      { id: 'db_diagnostic', title: 'Database Diagnostics', visible: true, size: 'lg:col-span-2' },
+      { id: 'pending_kyc', title: 'Pending KYC Reviews', visible: true, size: 'lg:col-span-1' },
+      { id: 'top_clients', title: 'Top Clients & Nodes', visible: true, size: 'lg:col-span-2' },
+    ]);
+    showToast('Dashboard widgets reset to default layout', 'success');
+  };
 
   useEffect(() => {
     const fetchHealth = async () => {
@@ -5903,16 +6401,19 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
   const m = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
   const c = (sumY - m * sumX) / n;
   
-  const projectedChartData = chartData.map((d, i) => ({
-    ...d,
-    projected: Math.max(0, m * i + c)
-  }));
+  const projectedChartData = [
+    ...chartData.map((d, i) => ({
+      ...d,
+      projected: Math.max(0, m * i + c)
+    })),
+    { name: 'Aug', revenue: null, projected: Math.max(0, m * 7 + c) },
+    { name: 'Sep', revenue: null, projected: Math.max(0, m * 8 + c) },
+    { name: 'Oct', revenue: null, projected: Math.max(0, m * 9 + c) }
+  ];
 
   const currentMonthRevenue = chartData[5].revenue;
   const prevMonthRevenue = chartData[4].revenue;
   const growth = ((currentMonthRevenue - prevMonthRevenue) / prevMonthRevenue) * 100;
-
-  // Prepare Risk Distribution Data for RadialBarChart
 
   const [showPredictiveRisk, setShowPredictiveRisk] = useState(false);
   const predictiveRiskLicenses = licenses.filter(l => {
@@ -5942,17 +6443,38 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
         { time: '15:00', avgScore: 41, critical: 0, total: 5 },
       ];
 
-  return (
-    <div className="space-y-6">
-      
-      {/* System Health & Security Posture */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-zinc-100 font-medium flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-indigo-400" /> System Integrity & Posture
-            </h3>
-            <div className="flex items-center gap-2">
+  const getWidgetIcon = (id: string) => {
+    switch (id) {
+      case 'system_health':
+        return <ShieldCheck className="w-4 h-4 text-indigo-400" />;
+      case 'risk_distribution':
+        return <Activity className="w-4 h-4 text-indigo-400" />;
+      case 'historical_risk':
+        return <Activity className="w-4 h-4 text-indigo-400" />;
+      case 'revenue_trend':
+        return <Building className="w-4 h-4 text-emerald-400" />;
+      case 'active_nodes':
+        return <Server className="w-4 h-4 text-blue-400" />;
+      case 'alert_logs':
+        return <Bell className="w-4 h-4 text-rose-400" />;
+      case 'pending_kyc':
+        return <ShieldAlert className="w-4 h-4 text-amber-400" />;
+      case 'db_diagnostic':
+        return <Database className="w-4 h-4 text-cyan-400" />;
+      case 'top_clients':
+        return <Layers className="w-4 h-4 text-purple-400" />;
+      default:
+        return <Activity className="w-4 h-4" />;
+    }
+  };
+
+  const renderWidgetContent = (id: string) => {
+    switch (id) {
+      case 'system_health':
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-zinc-500 font-mono">INTEGRITY STATUS</span>
               <span className={cn(
                 "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border",
                 riskAlerts.length === 0 && renewalAlerts.length === 0 ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
@@ -5961,137 +6483,466 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
                 {riskAlerts.length === 0 && renewalAlerts.length === 0 ? 'COMPLIANT' : riskAlerts.length > 0 ? 'BREACH_DETECTED' : 'ACTION_REQUIRED'}
               </span>
             </div>
-          </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
-              <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Risk Violations</span>
-              <div className="flex items-baseline gap-2">
-                <span className={cn("text-2xl font-bold font-mono", riskAlerts.length > 0 ? "text-rose-400" : "text-zinc-100")}>{riskAlerts.length}</span>
-                <span className="text-[10px] text-zinc-500 font-mono">active</span>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+                <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Risk Violations</span>
+                <div className="flex items-baseline gap-2">
+                  <span className={cn("text-2xl font-bold font-mono", riskAlerts.length > 0 ? "text-rose-400" : "text-zinc-100")}>{riskAlerts.length}</span>
+                  <span className="text-[10px] text-zinc-500 font-mono">active</span>
+                </div>
+              </div>
+              <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+                <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Expiring Soon</span>
+                <div className="flex items-baseline gap-2">
+                  <span className={cn("text-2xl font-bold font-mono", renewalAlerts.length > 0 ? "text-amber-400" : "text-zinc-100")}>{renewalAlerts.length}</span>
+                  <span className="text-[10px] text-zinc-500 font-mono">licenses</span>
+                </div>
+              </div>
+              <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
+                <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Network Health</span>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-2xl font-bold font-mono text-emerald-400">100%</span>
+                  <span className="text-[10px] text-zinc-500 font-mono">uptime</span>
+                </div>
               </div>
             </div>
-            <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
-              <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Expiring Soon</span>
-              <div className="flex items-baseline gap-2">
-                <span className={cn("text-2xl font-bold font-mono", renewalAlerts.length > 0 ? "text-amber-400" : "text-zinc-100")}>{renewalAlerts.length}</span>
-                <span className="text-[10px] text-zinc-500 font-mono">licenses</span>
+
+            <div className="flex gap-3 pt-2">
+              <button 
+                onClick={async () => {
+                  try {
+                    const res = await fetch('/api/diagnostics/trigger-threshold-check', { method: 'POST' });
+                    if (res.ok) showToast('System integrity scan initiated', 'success');
+                  } catch (e) {
+                    showToast('Failed to trigger scan', 'error');
+                  }
+                }}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Scan Integrity
+              </button>
+              <button className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-2 cursor-pointer">
+                <ShieldAlert className="w-3.5 h-3.5" />
+                Security Logs
+              </button>
+            </div>
+          </div>
+        );
+
+      case 'risk_distribution':
+        return (
+          <div className="flex flex-col h-full justify-between">
+            <div className="h-44 flex items-center justify-center relative">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={riskDistribution}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={45}
+                    outerRadius={65}
+                    paddingAngle={5}
+                    dataKey="value"
+                  >
+                    {riskDistribution.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.fill} stroke="transparent" />
+                    ))}
+                  </Pie>
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
+                    itemStyle={{ color: '#e4e4e7' }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="absolute flex flex-col items-center">
+                <span className="text-lg font-bold text-zinc-100 font-mono">{licenses.length}</span>
+                <span className="text-[8px] text-zinc-500 uppercase font-mono">Total Nodes</span>
               </div>
             </div>
-            <div className="p-4 bg-zinc-950/40 rounded-lg border border-zinc-800/60">
-              <span className="text-[10px] text-zinc-500 font-mono uppercase block mb-1">Network Health</span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold font-mono text-emerald-400">100%</span>
-                <span className="text-[10px] text-zinc-500 font-mono">uptime</span>
+            <div className="mt-2 grid grid-cols-2 gap-1.5 pb-2">
+              {riskDistribution.map((item, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: item.fill }}></div>
+                  <span className="text-[9px] text-zinc-400 truncate">{item.name.split(' ')[0]}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+
+      case 'historical_risk':
+        return (
+          <div className="space-y-2">
+            <p className="text-[11px] text-zinc-400">
+              Live tracked average tamper risk score across all active license nodes.
+            </p>
+            <div className="h-60 mt-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={trendData} margin={{ top: 10, right: 10, left: -25, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="colorAvg" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.2}/>
+                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="time" stroke="#71717a" fontSize={10} tickLine={false} />
+                  <YAxis stroke="#71717a" fontSize={10} domain={[0, 100]} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
+                    itemStyle={{ color: '#e4e4e7' }}
+                  />
+                  <Area type="monotone" dataKey="avgScore" name="Avg Tamper Risk (%)" stroke="#6366f1" fillOpacity={1} fill="url(#colorAvg)" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        );
+
+      case 'revenue_trend':
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-zinc-500 font-mono">REVENUE TREND</span>
+              <span className={cn("text-xs font-mono px-2 py-0.5 rounded", growth >= 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400")}>
+                {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
+              </span>
+            </div>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={projectedChartData} margin={{ top: 10, right: 5, left: -25, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#818cf8" stopOpacity={0.3}/>
+                      <stop offset="95%" stopColor="#818cf8" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="name" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                  <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(value) => `$${value/1000}k`} />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
+                    itemStyle={{ color: '#e4e4e7' }}
+                    formatter={(value: number | null, name: string) => [
+                      value ? `$${value.toLocaleString()}` : 'N/A', 
+                      name === 'revenue' ? 'Revenue' : 'Projected'
+                    ]}
+                  />
+                  <Area type="monotone" dataKey="revenue" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorRevenue)" />
+                  <Line type="monotone" dataKey="projected" stroke="#fbbf24" strokeDasharray="5 5" strokeWidth={2} dot={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        );
+
+      case 'active_nodes':
+        return (
+          <div className="space-y-4">
+            <span className="text-[10px] text-zinc-500 font-mono block">NODE ENROLLMENT TREND</span>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 10, right: 5, left: -25, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="name" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                  <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
+                    itemStyle={{ color: '#e4e4e7' }}
+                    cursor={{ fill: '#27272a', opacity: 0.4 }}
+                  />
+                  <Bar dataKey="active" fill="#34d399" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        );
+
+      case 'alert_logs':
+        return (
+          <div className="flex flex-col">
+            <span className="text-[10px] text-zinc-500 font-mono block mb-3">ACTIVE SYSTEM ALERTS</span>
+            <div className="h-56 overflow-y-auto space-y-2 pr-1 scrollbar-thin scrollbar-thumb-zinc-800">
+              {riskAlerts.map(alert => (
+                <div key={`risk-${alert.id}`} className="p-2.5 bg-rose-500/5 rounded-lg border border-rose-500/10 flex flex-col gap-0.5 text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-rose-400 flex items-center gap-1 font-mono uppercase text-[9px]">
+                      <ShieldAlert className="w-3 h-3 animate-pulse" /> High Risk
+                    </span>
+                    <span className="text-[9px] text-zinc-500 font-mono">Score: {alert.score}</span>
+                  </div>
+                  <p className="text-zinc-300 font-medium">{alert.software_name}</p>
+                  <p className="text-zinc-500 leading-tight">{alert.message}</p>
+                </div>
+              ))}
+              {renewalAlerts.map(alert => (
+                <div key={`renew-${alert.id}`} className="p-2.5 bg-amber-500/5 rounded-lg border border-amber-500/10 flex flex-col gap-0.5 text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-amber-400 flex items-center gap-1 font-mono uppercase text-[9px]">
+                      <AlertTriangle className="w-3 h-3" /> Expiring Soon
+                    </span>
+                    <span className="text-[9px] text-zinc-500 font-mono">{alert.days_remaining}d left</span>
+                  </div>
+                  <p className="text-zinc-300 font-medium">{alert.software_name}</p>
+                  <p className="text-zinc-500 leading-tight">Expires in {alert.days_remaining} days</p>
+                </div>
+              ))}
+              {riskAlerts.length === 0 && renewalAlerts.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center text-center text-zinc-600 py-12">
+                  <ShieldCheck className="w-6 h-6 text-emerald-500/30 mb-1" />
+                  <span className="text-xs font-mono">No active alerts.</span>
+                  <span className="text-[9px] text-zinc-600">All nodes are fully compliant.</span>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case 'db_diagnostic':
+        return (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-zinc-950/40 border border-zinc-800/40 p-4 rounded-xl flex items-center gap-4">
+              <div className={cn("p-2.5 rounded-lg bg-opacity-10", 
+                dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500 text-emerald-400" : "bg-rose-500 text-rose-400"
+              )}>
+                <Database className="w-4 h-4" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-1">
+                  <h4 className="text-xs font-medium text-zinc-100 truncate">SQLite Engine</h4>
+                  <span className={cn("text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0", 
+                    dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                  )}>
+                    {dbHealth?.sqlite?.status || 'Checking...'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 font-mono text-[9px] text-zinc-500">
+                  <span>Journal: <span className="text-zinc-300">{dbHealth?.sqlite?.journal_mode || '...'}</span></span>
+                  <span>Tables: <span className="text-zinc-300">{dbHealth?.sqlite?.tables || 0}</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-zinc-950/40 border border-zinc-800/40 p-4 rounded-xl flex items-center gap-4">
+              <div className={cn("p-2.5 rounded-lg bg-opacity-10", 
+                dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500 text-indigo-400" : "bg-rose-500 text-rose-400"
+              )}>
+                <Zap className="w-4 h-4" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-1">
+                  <h4 className="text-xs font-medium text-zinc-100 truncate">DuckDB OLAP</h4>
+                  <span className={cn("text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0", 
+                    dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                  )}>
+                    {dbHealth?.duckdb?.status || 'Checking...'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 font-mono text-[9px] text-zinc-500">
+                  <span>RAM: <span className="text-zinc-300">{dbHealth?.duckdb?.memory_usage ? `${Math.round(dbHealth.duckdb.memory_usage / 1024 / 1024)}MB` : '...'}</span></span>
+                  <span>Records: <span className="text-zinc-300">{dbHealth?.duckdb?.records || 0}</span></span>
+                </div>
               </div>
             </div>
           </div>
+        );
 
-          <div className="mt-6 flex gap-3">
-            <button 
-              onClick={async () => {
-                try {
-                  const res = await fetch('/api/diagnostics/trigger-threshold-check', { method: 'POST' });
-                  if (res.ok) showToast('System integrity scan initiated', 'success');
-                } catch (e) {
-                  showToast('Failed to trigger scan', 'error');
-                }
-              }}
-              className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-2"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              Scan Integrity
-            </button>
-            <button className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-2">
-              <ShieldAlert className="w-3.5 h-3.5" />
-              Security Logs
-            </button>
+      case 'pending_kyc': {
+        const pendingClients = clients.filter(c => c.kyc_status === 'pending');
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] text-zinc-500 font-mono">KYC REVIEWS</span>
+              <span className={cn(
+                "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border",
+                pendingClients.length === 0 ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+              )}>
+                {pendingClients.length} PENDING
+              </span>
+            </div>
+            {pendingClients.length === 0 ? (
+              <div className="text-center py-6">
+                <ShieldCheck className="w-6 h-6 text-emerald-500 mx-auto mb-2 opacity-50" />
+                <p className="text-xs text-zinc-500 font-mono">All clients verified</p>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1 no-scrollbar">
+                {pendingClients.map(c => (
+                  <div key={c.id} className="p-3 bg-zinc-950/50 border border-zinc-800/80 rounded-lg flex items-center justify-between">
+                    <div>
+                      <h4 className="text-xs font-medium text-zinc-200">{c.name}</h4>
+                      <div className="text-[10px] font-mono text-zinc-500 mt-1">
+                        Risk: <span className={cn(c.risk_rating === 'high' ? 'text-rose-400' : c.risk_rating === 'medium' ? 'text-amber-400' : 'text-emerald-400')}>{c.risk_rating || 'low'}</span>
+                      </div>
+                    </div>
+                    <button className="px-3 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded text-[10px] font-bold uppercase transition-colors">
+                      Review
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      case 'top_clients':
+        return (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="p-4 bg-zinc-950/30 border border-zinc-850 rounded-xl">
+              <h4 className="text-xs font-medium text-zinc-300 mb-3 flex items-center gap-1.5"><Building className="w-3.5 h-3.5 text-purple-400"/> Top Clients (Revenue)</h4>
+              <div className="space-y-2">
+                {Array.from(licenses.reduce((acc, l) => acc.set(l.issued_to, (acc.get(l.issued_to) || 0) + getLicenseFee(l)), new Map<string, number>()).entries())
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 5)
+                  .map(([name, revenue], i) => (
+                    <div key={name} className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-lg border border-zinc-800/40">
+                      <span className="text-xs text-zinc-300 font-medium truncate max-w-[140px]">{i + 1}. {name}</span>
+                      <span className="text-xs text-emerald-400 font-mono font-medium">${revenue.toLocaleString()}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            <div className="p-4 bg-zinc-950/30 border border-zinc-850 rounded-xl">
+              <h4 className="text-xs font-medium text-zinc-300 mb-3 flex items-center gap-1.5"><Cpu className="w-3.5 h-3.5 text-blue-400"/> Top Active Nodes</h4>
+              <div className="space-y-2">
+                {[...licenses].sort((a, b) => (b.current_earnings || 0) - (a.current_earnings || 0))
+                  .slice(0, 5)
+                  .map((l, i) => (
+                    <div key={l.id} className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-lg border border-zinc-800/40">
+                      <span className="text-xs text-zinc-300 font-mono truncate max-w-[140px]">{i + 1}. {l.hardware_id || 'UNKNOWN'}</span>
+                      <span className="text-xs text-emerald-400 font-mono font-medium">${(l.current_earnings || 0).toLocaleString()}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Customization Toolbar */}
+      <div className="bg-zinc-900/40 border border-zinc-800/80 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 backdrop-blur-sm">
+        <div className="flex items-center gap-3">
+          <SlidersHorizontal className="w-4 h-4 text-indigo-400" />
+          <div>
+            <h4 className="text-sm font-medium text-zinc-200">Custom Dashboard Layout</h4>
+            <p className="text-[11px] text-zinc-500 font-mono">Toggle dashboard widgets and drag them to arrange your workspace.</p>
           </div>
         </div>
+        
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <button 
+            onClick={() => setIsCustomizing(!isCustomizing)}
+            className={cn("px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all border cursor-pointer", 
+              isCustomizing 
+                ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/30 ring-1 ring-indigo-500/20" 
+                : "bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-750"
+            )}
+          >
+            {isCustomizing ? 'Done Customizing' : 'Customize Widgets'}
+          </button>
+          
+          {isCustomizing && (
+            <button 
+              onClick={resetWidgets}
+              className="bg-zinc-800/50 hover:bg-zinc-800 text-zinc-400 border border-zinc-800 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer"
+            >
+              Reset Layout
+            </button>
+          )}
+        </div>
+      </div>
 
-        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-          <h3 className="text-zinc-100 font-medium mb-4 flex items-center gap-2">
-            <Activity className="w-4 h-4 text-indigo-400" /> Risk Distribution
-          </h3>
-          <div className="h-48 flex items-center justify-center">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={riskDistribution}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={50}
-                  outerRadius={70}
-                  paddingAngle={5}
-                  dataKey="value"
-                >
-                  {riskDistribution.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.fill} stroke="transparent" />
-                  ))}
-                </Pie>
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
-                  itemStyle={{ color: '#e4e4e7' }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="absolute flex flex-col items-center">
-              <span className="text-xl font-bold text-zinc-100 font-mono">{licenses.length}</span>
-              <span className="text-[8px] text-zinc-500 uppercase font-mono">Total Nodes</span>
-            </div>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            {riskDistribution.map((item, i) => (
-              <div key={i} className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: item.fill }}></div>
-                <span className="text-[9px] text-zinc-400 truncate">{item.name.split(' ')[0]}</span>
-              </div>
+      {/* Widget Toggle Panel */}
+      {isCustomizing && (
+        <div className="bg-zinc-900/20 border border-zinc-800/40 rounded-xl p-4 space-y-2">
+          <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider block">Visible Dashboard Widgets</span>
+          <div className="flex flex-wrap gap-2">
+            {widgets.map(w => (
+              <button
+                key={w.id}
+                onClick={() => toggleWidgetVisibility(w.id)}
+                className={cn("px-3 py-1.5 rounded-lg text-xs font-medium border transition-all flex items-center gap-1.5 cursor-pointer", 
+                  w.visible 
+                    ? "bg-indigo-500/10 text-indigo-300 border-indigo-500/20" 
+                    : "bg-zinc-950/40 text-zinc-600 border-zinc-900 line-through"
+                )}
+              >
+                {w.visible ? <Check className="w-3.5 h-3.5 text-indigo-400" /> : <Plus className="w-3.5 h-3.5" />}
+                {w.title}
+              </button>
             ))}
           </div>
         </div>
+      )}
+
+      {/* Main Grid containing widgets */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {widgets.map((widget) => {
+          if (!widget.visible) return null;
+          
+          const isCurrentlyDragged = draggedId === widget.id;
+          const isCurrentlyOver = dragOverId === widget.id;
+
+          return (
+            <div
+              key={widget.id}
+              draggable={isCustomizing}
+              onDragStart={(e) => handleDragStart(e, widget.id)}
+              onDragOver={(e) => handleDragOver(e, widget.id)}
+              onDrop={(e) => handleDrop(e, widget.id)}
+              onDragEnd={handleDragEnd}
+              className={cn(
+                "bg-zinc-900/30 border rounded-xl p-6 backdrop-blur-sm transition-all duration-250 flex flex-col justify-between",
+                widget.size,
+                isCustomizing ? "border-dashed" : "border-zinc-800/80",
+                isCurrentlyDragged ? "opacity-30 border-indigo-500/40" : "",
+                isCurrentlyOver ? "border-indigo-500 bg-indigo-500/5 shadow-[0_0_15px_rgba(99,102,241,0.15)] scale-[1.01]" : "border-zinc-800/80 hover:border-zinc-750"
+              )}
+            >
+              {/* Widget Header with drag handle and remove toggle */}
+              <div className="flex items-center justify-between mb-5 pb-2 border-b border-zinc-800/40 select-none">
+                <div className="flex items-center gap-2">
+                  {isCustomizing && (
+                    <div className="cursor-grab active:cursor-grabbing text-zinc-500 hover:text-indigo-400 p-1 rounded hover:bg-zinc-800/60 transition-colors">
+                      <GripVertical className="w-4 h-4" />
+                    </div>
+                  )}
+                  <span className="text-zinc-100 font-medium flex items-center gap-2">
+                    {getWidgetIcon(widget.id)} {widget.title}
+                  </span>
+                </div>
+                
+                {isCustomizing && (
+                  <button 
+                    onClick={() => toggleWidgetVisibility(widget.id)}
+                    className="text-zinc-500 hover:text-rose-400 p-1 rounded hover:bg-zinc-800/60 transition-colors cursor-pointer"
+                    title="Remove widget"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Render Widget Content */}
+              <div className="flex-1">
+                {renderWidgetContent(widget.id)}
+              </div>
+            </div>
+          );
+        })}
       </div>
 
-      {/* Historical Risk Integrity Trend */}
-      <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h3 className="text-zinc-100 font-medium flex items-center gap-2">
-              <Activity className="w-4 h-4 text-indigo-400" /> Historical Risk & Telemetry Trend
-            </h3>
-            <p className="text-[10px] text-zinc-400 mt-0.5">
-              Live tracked average tamper risk score across all active license nodes.
-            </p>
-          </div>
-          {riskSnapshots && riskSnapshots.length > 0 && (
-            <span className="text-[10px] font-mono text-zinc-500">
-              {riskSnapshots.length} snapshot(s) stored
-            </span>
-          )}
-        </div>
-
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={trendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-              <defs>
-                <linearGradient id="colorAvg" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#6366f1" stopOpacity={0.2}/>
-                  <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-              <XAxis dataKey="time" stroke="#71717a" fontSize={10} tickLine={false} />
-              <YAxis stroke="#71717a" fontSize={10} domain={[0, 100]} tickLine={false} />
-              <Tooltip
-                contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '10px' }}
-                itemStyle={{ color: '#e4e4e7' }}
-              />
-              <Area type="monotone" dataKey="avgScore" name="Avg Tamper Risk (%)" stroke="#6366f1" fillOpacity={1} fill="url(#colorAvg)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* Predictive Risk Toggle */}
+      {/* Predictive Risk Toggle and Panel */}
       <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 p-4 rounded-xl">
         <div>
           <h3 className="text-zinc-100 font-medium flex items-center gap-2">
@@ -6103,7 +6954,7 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
         </div>
         <button 
           onClick={() => setShowPredictiveRisk(!showPredictiveRisk)}
-          className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-colors border", 
+          className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-colors border cursor-pointer", 
             showPredictiveRisk ? "bg-amber-500/10 text-amber-400 border-amber-500/30" : "bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700"
           )}>
           {showPredictiveRisk ? 'Hide Risks' : 'Analyze Risks'}
@@ -6164,73 +7015,6 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
         </div>
       )}
 
-      {/* Database Diagnostic Card */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-zinc-900/30 border border-zinc-800/80 p-4 rounded-xl backdrop-blur-sm flex items-center gap-4">
-          <div className={cn("p-3 rounded-lg bg-opacity-10", 
-            dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500 text-emerald-400" : "bg-rose-500 text-rose-400"
-          )}>
-            <Database className="w-5 h-5" />
-          </div>
-          <div className="flex-1">
-            <div className="flex items-center justify-between">
-              <h4 className="text-sm font-medium text-zinc-100">SQLite Core Engine</h4>
-              <span className={cn("text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded", 
-                dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-              )}>
-                {dbHealth?.sqlite?.status || 'Checking...'}
-              </span>
-            </div>
-            <div className="flex items-center gap-3 mt-1.5">
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
-                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
-                Journal: <span className="text-zinc-300">{dbHealth?.sqlite?.journal_mode || '...'}</span>
-              </div>
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
-                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
-                Tables: <span className="text-zinc-300">{dbHealth?.sqlite?.tables || 0}</span>
-              </div>
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
-                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
-                Conn: <span className="text-zinc-300">{dbHealth?.sqlite?.connectionStatus || 'active'}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-zinc-900/30 border border-zinc-800/80 p-4 rounded-xl backdrop-blur-sm flex items-center gap-4">
-          <div className={cn("p-3 rounded-lg bg-opacity-10", 
-            dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500 text-indigo-400" : "bg-rose-500 text-rose-400"
-          )}>
-            <Zap className="w-5 h-5" />
-          </div>
-          <div className="flex-1">
-            <div className="flex items-center justify-between">
-              <h4 className="text-sm font-medium text-zinc-100">DuckDB OLAP Engine</h4>
-              <span className={cn("text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded", 
-                dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-              )}>
-                {dbHealth?.duckdb?.status || 'Checking...'}
-              </span>
-            </div>
-            <div className="flex items-center gap-3 mt-1.5">
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
-                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
-                Sync Status: <span className="text-zinc-300">Synchronized</span>
-              </div>
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
-                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
-                RAM: <span className="text-zinc-300">{dbHealth?.duckdb?.memory_usage ? `${Math.round(dbHealth.duckdb.memory_usage / 1024 / 1024)}MB` : '...'}</span>
-              </div>
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1">
-                <div className="w-1 h-1 rounded-full bg-zinc-600"></div>
-                Records: <span className="text-zinc-300">{dbHealth?.duckdb?.records || 0}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Audit Action Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-zinc-900/30 border border-zinc-800/80 p-6 rounded-xl backdrop-blur-sm gap-4">
         <div>
@@ -6248,136 +7032,6 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
           <Download className="w-4 h-4 animate-bounce" />
           {generating ? 'Compiling PDF...' : 'Generate Monthly Audit PDF'}
         </button>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-sm font-medium text-zinc-100 flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-400"/> Revenue Overview</h3>
-            <span className={cn("text-xs font-mono px-2 py-1 rounded", growth >= 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400")}>
-              {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
-            </span>
-          </div>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={projectedChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#818cf8" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#818cf8" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="name" stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} />
-                <YAxis stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(value) => `$${value/1000}k`} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
-                  itemStyle={{ color: '#e4e4e7' }}
-                  formatter={(value: number) => [`$${value.toLocaleString()}`, 'Revenue']}
-                />
-                <Area type="monotone" dataKey="revenue" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorRevenue)" />
-                <Line type="monotone" dataKey="projected" stroke="#fbbf24" strokeDasharray="5 5" strokeWidth={2} dot={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-          <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2"><Server className="w-4 h-4 text-emerald-400"/> Active Nodes Trend</h3>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="name" stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} />
-                <YAxis stroke="#52525b" fontSize={12} tickLine={false} axisLine={false} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
-                  itemStyle={{ color: '#e4e4e7' }}
-                  cursor={{ fill: '#27272a', opacity: 0.4 }}
-                />
-                <Bar dataKey="active" fill="#34d399" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm lg:col-span-2">
-          <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 text-rose-400"/> Enterprise Risk Score Distribution
-          </h3>
-          <div className="h-80 flex flex-col md:flex-row items-center justify-center gap-8">
-            <div className="w-full h-full max-w-[400px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <RadialBarChart 
-                  cx="50%" 
-                  cy="50%" 
-                  innerRadius="30%" 
-                  outerRadius="100%" 
-                  barSize={15} 
-                  data={riskDistribution}
-                  startAngle={180} 
-                  endAngle={-180}
-                >
-                  <RadialBar
-                    background
-                    dataKey="value"
-                    cornerRadius={10}
-                  />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
-                    itemStyle={{ color: '#e4e4e7' }}
-                  />
-                  <Legend 
-                    iconSize={10} 
-                    layout="vertical" 
-                    verticalAlign="middle" 
-                    wrapperStyle={{ right: -20, top: 0, fontSize: '11px', color: '#a1a1aa' }} 
-                  />
-                </RadialBarChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="grid grid-cols-2 gap-4 w-full md:w-auto">
-              {riskDistribution.map(d => (
-                <div key={d.name} className="bg-zinc-950/50 p-3 rounded-lg border border-zinc-800/50 min-w-[140px]">
-                  <div className="text-[10px] text-zinc-500 font-mono uppercase mb-1">{d.name.split(' ')[0]}</div>
-                  <div className="text-xl font-bold text-zinc-200">{d.value}</div>
-                  <div className="text-[9px] text-zinc-600 mt-1">Licenses in bracket</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-        
-        {/* Quick Reports */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-            <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2"><Building className="w-4 h-4 text-purple-400"/> Top 5 Clients (Revenue)</h3>
-            <div className="space-y-3">
-              {Array.from(licenses.reduce((acc, l) => acc.set(l.issued_to, (acc.get(l.issued_to) || 0) + (l.product_price || 0)), new Map<string, number>()).entries())
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 5)
-                .map(([name, revenue], i) => (
-                  <div key={name} className="flex items-center justify-between bg-zinc-950/50 p-3 rounded-lg border border-zinc-800/50">
-                    <span className="text-sm text-zinc-300 font-medium">{i + 1}. {name}</span>
-                    <span className="text-sm text-emerald-400 font-mono">${revenue.toLocaleString()}</span>
-                  </div>
-                ))}
-            </div>
-          </div>
-          <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm">
-            <h3 className="text-sm font-medium text-zinc-100 mb-6 flex items-center gap-2"><Cpu className="w-4 h-4 text-blue-400"/> Top 5 Most Active Nodes</h3>
-            <div className="space-y-3">
-              {[...licenses].sort((a, b) => (b.current_earnings || 0) - (a.current_earnings || 0))
-                .slice(0, 5)
-                .map((l, i) => (
-                  <div key={l.id} className="flex items-center justify-between bg-zinc-950/50 p-3 rounded-lg border border-zinc-800/50">
-                    <span className="text-xs text-zinc-300 font-mono">{i + 1}. {l.hardware_id || 'UNKNOWN'}</span>
-                    <span className="text-sm text-emerald-400 font-mono">${(l.current_earnings || 0).toLocaleString()}</span>
-                  </div>
-                ))}
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -6431,6 +7085,7 @@ function BatchEditModal({
     api_calls_limit_monthly: false,
     api_calls_limit_yearly: false,
     billing_cycle: false,
+    profit_share_pct: false,
     status: false,
     asset_classes: false,
     features: false,
@@ -6443,6 +7098,7 @@ function BatchEditModal({
     api_calls_limit_monthly: 1500000,
     api_calls_limit_yearly: 18000000,
     billing_cycle: 'monthly',
+    profit_share_pct: 15,
     status: 'active',
     asset_classes: {
       forex: true,
@@ -6477,6 +7133,9 @@ function BatchEditModal({
     }
     if (enabledFields.billing_cycle) {
       updates.billing_cycle = formData.billing_cycle;
+    }
+    if (enabledFields.profit_share_pct) {
+      updates.profit_share_pct = Number(formData.profit_share_pct);
     }
     if (enabledFields.status) {
       updates.status = formData.status;
@@ -6624,7 +7283,25 @@ function BatchEditModal({
                   <option value="monthly">Monthly</option>
                   <option value="yearly">Yearly</option>
                   <option value="onetime">One-time</option>
+                  <option value="profit_share">Hedge Fund Profit Share</option>
                 </select>
+              </div>
+
+              {/* Profit Share % */}
+              <div className={cn("p-4 rounded-xl border transition-all", enabledFields.profit_share_pct ? "bg-indigo-950/10 border-indigo-500/30" : "bg-zinc-950/20 border-zinc-800/60 opacity-60")}>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+                  <input type="checkbox" checked={enabledFields.profit_share_pct} onChange={() => toggleField('profit_share_pct')} className="rounded border-zinc-700 bg-zinc-900 text-indigo-500 focus:ring-indigo-500/20 w-4 h-4" />
+                  <span className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-medium">Profit Share %</span>
+                </label>
+                <input 
+                  type="number" 
+                  min="1"
+                  max="100"
+                  value={formData.profit_share_pct} 
+                  disabled={!enabledFields.profit_share_pct}
+                  onChange={e => setFormData({ ...formData, profit_share_pct: Number(e.target.value) })}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors font-mono disabled:opacity-50" 
+                />
               </div>
 
               {/* License Status */}

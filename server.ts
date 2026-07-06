@@ -6,6 +6,10 @@ import { Server } from "socket.io";
 import helmet from "helmet";
 import cors from "cors";
 import compression from "compression";
+import rateLimit from "express-rate-limit";
+import hpp from "hpp";
+// @ts-ignore
+import xss from "xss-clean";
 import {
   getAllLicenses, createLicense, updateLicenseStatus, deleteLicense, updateLicenseDetails, updateLicenseEarnings, getLicenseByKey, logLicenseEvent as rawLogLicenseEvent, getFailedVerificationsInLastHour,
   updateLicenseConfig, incrementApiCalls, batchUpdateLicenses,
@@ -28,8 +32,39 @@ import { License, AppUser, AuditLog, LicenseEvent } from "./src/types";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import cookieParser from "cookie-parser";
 import { execSync } from "child_process";
+import { validateLicenseKeyFormat } from "./src/lib/licenseKeyUtils";
 import { initializeDuckDBSchema, calculateDuckDBRiskScores, checkDuckDBHealth } from "./src/analytics";
+
+const JWT_SECRET = process.env.JWT_SECRET || 'quant-fund-super-secret-key-2026-override-this';
+
+function generateToken(user: AppUser) {
+  return jwt.sign(
+    { id: user.id, email: user.email, role: user.role },
+    JWT_SECRET,
+    { expiresIn: '8h' }
+  );
+}
+
+function verifyToken(req: any, res: any, next: any) {
+  // Allow hardware nodes to verify licenses without user auth
+  if (req.path === '/license/verify' || req.path === '/api/license/verify') {
+    return next();
+  }
+
+  const token = req.cookies?.auth_token || req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
 
 async function startServer() {
   await initializeDuckDBSchema();
@@ -39,9 +74,25 @@ async function startServer() {
   app.use(helmet({
     contentSecurityPolicy: false, // Disable CSP for easier integration with Vite in dev
   }));
+  
+  // Limit requests from same API (OWASP A04: Insecure Design)
+  const limiter = rateLimit({
+    max: 1000,
+    windowMs: 60 * 60 * 1000, // 1 hour
+    message: 'Too many requests from this IP, please try again in an hour!'
+  });
+  app.use('/api', limiter);
+
   app.use(cors());
   app.use(compression());
-  app.use(express.json());
+  app.use(express.json({ limit: '10kb' }));
+  app.use(cookieParser());
+
+  // Data sanitization against XSS (OWASP A03: Injection)
+  app.use(xss());
+
+  // Prevent HTTP Parameter Pollution (OWASP A08: Software and Data Integrity Failures)
+  app.use(hpp());
 
   // Cryptographic Setup for Offline Licensing
   let privateKey = getSystemConfig("private_key");
@@ -369,18 +420,35 @@ async function notifyUsers(event: string, subject: string, text: string) {
   io.on("connection", (socket) => {
     console.log("Client connected:", socket.id);
     
-    socket.emit("licenses:init", getAllLicenses());
-    socket.emit("clients:init", getAllClients());
-    socket.emit("software_products:init", getAllSoftwareProducts());
-    socket.emit("license_tiers:init", getAllLicenseTiers());
-    socket.emit("audit_schedule:init", getAuditSchedule());
-    socket.emit("users:init", getAllUsers());
-    socket.emit("audit_logs:init", getAllAuditLogs());
-    socket.emit("alerts:renewal", getRenewalAlerts());
-    socket.emit("nodes:live", Array.from(liveNodes.entries()).map(([key, val]) => ({
-      license_key: key,
-      ...val
-    })));
+    let isAuthenticated = false;
+    let authUser = null;
+    try {
+      const cookieHeader = socket.request.headers.cookie;
+      if (cookieHeader) {
+        const cookies = require('cookie').parse(cookieHeader);
+        if (cookies.auth_token) {
+          authUser = jwt.verify(cookies.auth_token, JWT_SECRET);
+          isAuthenticated = true;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    if (isAuthenticated) {
+      socket.emit("licenses:init", getAllLicenses());
+      socket.emit("clients:init", getAllClients());
+      socket.emit("software_products:init", getAllSoftwareProducts());
+      socket.emit("license_tiers:init", getAllLicenseTiers());
+      socket.emit("audit_schedule:init", getAuditSchedule());
+      socket.emit("users:init", getAllUsers());
+      socket.emit("audit_logs:init", getAllAuditLogs());
+      socket.emit("alerts:renewal", getRenewalAlerts());
+      socket.emit("nodes:live", Array.from(liveNodes.entries()).map(([key, val]) => ({
+        license_key: key,
+        ...val
+      })));
+    }
 
     socket.on("node:connect", ({ license_key, hardware_id, ip, asset_class, account_id, heartbeat_interval }: any) => {
       try {
@@ -572,6 +640,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("node:disconnect_node", ({ license_key, isZombie }: { license_key: string, isZombie?: boolean }) => {
+      if (!isAuthenticated) return;
       const val = liveNodes.get(license_key);
       if (val) {
         const socketToDisconnect = io.sockets.sockets.get(val.socketId);
@@ -651,6 +720,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:create", ({ license, user }: { license: License, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         const created = createLicense(license);
         io.emit("licenses:created", created);
@@ -661,6 +731,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:update_status", ({ id, status, user }: { id: string, status: string, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         updateLicenseStatus(id, status);
         io.emit("licenses:status_updated", { id, status });
@@ -671,6 +742,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:update_details", ({ id, updates, user }: { id: string, updates: any, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         updateLicenseDetails(id, updates);
         io.emit("licenses:updated", { id, ...updates });
@@ -681,6 +753,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:delete", ({ id, user }: { id: string, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         deleteLicense(id);
         io.emit("licenses:deleted", id);
@@ -691,6 +764,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:extend", ({ id, expiresAt, user }: { id: string, expiresAt: string, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         extendLicenseExpiry(id, expiresAt);
         io.emit("licenses:extended", { id, expiresAt });
@@ -701,6 +775,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:reset_hwid", ({ id, user }: { id: string, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         updateLicenseHWID(id, ''); // Clear the HWID
         io.emit("licenses:hwid_reset", id);
@@ -711,6 +786,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:update_config", ({ id, config }: { id: string, config: any }) => {
+      if (!isAuthenticated) return;
       try {
         updateLicenseConfig(id, config);
         io.emit("licenses:config_updated", { id, config });
@@ -720,6 +796,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("licenses:batch_update", ({ ids, updates, user }: { ids: string[], updates: any, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         batchUpdateLicenses(ids, updates);
         io.emit("licenses:batch_updated", { ids, updates });
@@ -793,6 +870,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("clients:create", ({ client, user }: { client: any, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         const created = createClient(client);
         io.emit("clients:created", created);
@@ -803,6 +881,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("clients:update", ({ id, updates, user }: { id: string, updates: any, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         updateClient(id, updates);
         io.emit("clients:updated", { id, updates });
@@ -813,6 +892,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("clients:delete", ({ id, user }: { id: string, user: AppUser }) => {
+      if (!isAuthenticated) return;
       try {
         deleteClient(id);
         io.emit("clients:deleted", id);
@@ -823,6 +903,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("software_products:create", (prod) => {
+      if (!isAuthenticated) return;
       try {
         const created = createSoftwareProduct(prod);
         io.emit("software_products:created", created);
@@ -832,6 +913,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("software_products:update", ({ id, updates }: { id: string, updates: any }) => {
+      if (!isAuthenticated) return;
       try {
         updateSoftwareProduct(id, updates);
         io.emit("software_products:updated", { id, updates });
@@ -841,6 +923,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("software_products:delete", (id: string) => {
+      if (!isAuthenticated) return;
       try {
         deleteSoftwareProduct(id);
         io.emit("software_products:deleted", id);
@@ -850,6 +933,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("license_tiers:create", (tier) => {
+      if (!isAuthenticated) return;
       try {
         const created = createLicenseTier(tier);
         io.emit("license_tiers:created", created);
@@ -859,6 +943,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("license_tiers:update", ({ id, updates }: { id: string, updates: any }) => {
+      if (!isAuthenticated) return;
       try {
         updateLicenseTier(id, updates);
         io.emit("license_tiers:updated", { id, updates });
@@ -868,6 +953,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("license_tiers:delete", (id: string) => {
+      if (!isAuthenticated) return;
       try {
         deleteLicenseTier(id);
         io.emit("license_tiers:deleted", id);
@@ -876,9 +962,12 @@ async function notifyUsers(event: string, subject: string, text: string) {
       }
     });
 
-    socket.on("users:create", (user: AppUser) => {
+    socket.on("users:create", async (user: AppUser & { password?: string }) => {
+      if (!isAuthenticated) return;
       try {
-        const created = createUser(user);
+        const passwordToHash = user.password || 'admin123';
+        const hashedPassword = await bcrypt.hash(passwordToHash, 10);
+        const created = createUser({ ...user, password: hashedPassword });
         io.emit("users:created", created);
       } catch (err) {
         console.error("Error creating user:", err);
@@ -886,6 +975,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("users:update_role", ({ id, role }: { id: string, role: string }) => {
+      if (!isAuthenticated) return;
       try {
         
         updateUserRole(id, role);
@@ -898,6 +988,7 @@ async function notifyUsers(event: string, subject: string, text: string) {
     });
 
     socket.on("users:delete", (id: string) => {
+      if (!isAuthenticated) return;
       try {
         deleteUser(id);
         io.emit("users:deleted", id);
@@ -1066,7 +1157,13 @@ async function notifyUsers(event: string, subject: string, text: string) {
     }
   });
 
-  app.post("/api/auth/login", async (req, res) => {
+  const loginLimiter = rateLimit({
+    max: 5, // Limit each IP to 5 login requests per `window` (here, per 15 minutes)
+    windowMs: 15 * 60 * 1000,
+    message: 'Too many login attempts from this IP, please try again after 15 minutes'
+  });
+
+  app.post("/api/auth/login", loginLimiter, async (req, res) => {
     const { email, password } = req.body;
     
     if (!email || !password) {
@@ -1090,13 +1187,26 @@ async function notifyUsers(event: string, subject: string, text: string) {
       // Remove password before sending back
       const { password: _, ...userWithoutPassword } = user;
       
+      const token = generateToken(user);
+      res.cookie('auth_token', token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 8 * 60 * 60 * 1000 // 8 hours
+      });
+      
       logAction(userWithoutPassword as any, "Login", "User", user.id, "User logged in via web interface");
       
-      res.json({ user: userWithoutPassword });
+      res.json({ user: userWithoutPassword, token });
     } catch (err) {
       console.error("Login error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    res.clearCookie('auth_token');
+    res.json({ success: true });
   });
 
   app.post("/api/auth/recover-request", async (req, res) => {
@@ -1200,6 +1310,9 @@ async function notifyUsers(event: string, subject: string, text: string) {
       res.status(500).json({ error: "Internal server error" });
     }
   });
+
+  // Protect all API routes below this line
+  app.use('/api', verifyToken);
 
   app.get("/api/smtp", (req, res) => {
     const settings = getSMTPSettings();
@@ -1386,6 +1499,11 @@ async function notifyUsers(event: string, subject: string, text: string) {
 
       if (!license_key) {
         return res.status(400).json({ valid: false, error: "license_key is required" });
+      }
+
+      // Fast-fail cryptographic validation before database hit
+      if (!validateLicenseKeyFormat(license_key)) {
+        return res.status(400).json({ valid: false, error: "Invalid license key format or checksum" });
       }
 
       const license = getLicenseByKey(license_key);
@@ -1619,6 +1737,51 @@ async function notifyUsers(event: string, subject: string, text: string) {
     }
   });
 
+  app.post("/api/webhooks/kyc", express.json(), (req, res) => {
+    try {
+      const { client_id, kyc_status, aml_status, risk_rating, kyc_notes } = req.body;
+      if (!client_id) {
+        return res.status(400).json({ error: "client_id is required" });
+      }
+      
+      const clients = getAllClients();
+      const client = clients.find(c => c.id === client_id);
+      
+      if (!client) {
+        return res.status(404).json({ error: "Client not found" });
+      }
+
+      const updates: any = {};
+      const changes: string[] = [];
+      
+      if (kyc_status && kyc_status !== client.kyc_status) {
+        updates.kyc_status = kyc_status;
+        changes.push(`KYC Status: ${client.kyc_status || 'pending'} -> ${kyc_status}`);
+      }
+      if (aml_status && aml_status !== client.aml_status) {
+        updates.aml_status = aml_status;
+        changes.push(`AML Status: ${client.aml_status || 'clear'} -> ${aml_status}`);
+      }
+      if (risk_rating && risk_rating !== client.risk_rating) {
+        updates.risk_rating = risk_rating;
+        changes.push(`Risk Rating: ${client.risk_rating || 'low'} -> ${risk_rating}`);
+      }
+      if (kyc_notes !== undefined) {
+        updates.kyc_notes = kyc_notes;
+      }
+      
+      if (Object.keys(updates).length > 0) {
+        updateClient(client_id, updates);
+        io.emit("clients:updated", { id: client_id, updates });
+        logAction(null, 'compliance_webhook', 'client', client_id, `Automated KYC Webhook Update. ${changes.join(', ')}`);
+      }
+      
+      res.json({ success: true, updated: Object.keys(updates).length > 0 });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   app.get("/api/software_products", (req, res) => {
     res.json(getAllSoftwareProducts());
   });
@@ -1717,9 +1880,12 @@ async function notifyUsers(event: string, subject: string, text: string) {
     res.json(getAllAuditLogs());
   });
 
-  app.post("/api/users", (req, res) => {
+  app.post("/api/users", async (req, res) => {
     try {
-      const created = createUser(req.body);
+      const user = req.body;
+      const passwordToHash = user.password || 'admin123';
+      const hashedPassword = await bcrypt.hash(passwordToHash, 10);
+      const created = createUser({ ...user, password: hashedPassword });
       io.emit("users:created", created);
       res.json(created);
     } catch (err) {

@@ -45,7 +45,8 @@ db.exec(`
     device_fingerprint TEXT,
     asset_classes TEXT,
     restricted_accounts TEXT,
-    billing_cycle TEXT DEFAULT 'onetime'
+    billing_cycle TEXT DEFAULT 'onetime',
+    profit_share_pct REAL DEFAULT 15
   );
 `);
 
@@ -57,6 +58,17 @@ try {
     db.exec("ALTER TABLE licenses ADD COLUMN billing_cycle TEXT DEFAULT 'onetime'");
   } catch (err) {
     console.error("Migration failed:", err);
+  }
+}
+
+// Migration: Add profit_share_pct if missing
+try {
+  db.prepare("SELECT profit_share_pct FROM licenses LIMIT 1").get();
+} catch (e) {
+  try {
+    db.exec("ALTER TABLE licenses ADD COLUMN profit_share_pct REAL DEFAULT 15");
+  } catch (err) {
+    console.error("Migration failed for profit_share_pct:", err);
   }
 }
 
@@ -77,7 +89,13 @@ db.exec(`
     email TEXT NOT NULL,
     mobile TEXT NOT NULL,
     address TEXT NOT NULL,
-    extra_info TEXT NOT NULL
+    extra_info TEXT NOT NULL,
+    kyc_status TEXT DEFAULT 'pending',
+    company_registration_number TEXT,
+    tax_id TEXT,
+    risk_rating TEXT DEFAULT 'low',
+    aml_status TEXT DEFAULT 'clear',
+    kyc_notes TEXT
   );
 
   -- Create Software Products table
@@ -152,21 +170,13 @@ db.exec(`
     notification_preferences TEXT DEFAULT '{"expirations":true,"renewals":true,"assignments":true}'
   );
 
-  // Seed Default Users (Passwords are 'admin123')
+  -- Seed Default Users (Passwords are 'admin123')
   INSERT OR IGNORE INTO users (id, name, email, password, role, created_at)
   VALUES 
     ('user_01', 'System Admin', 'admin@nonaxen.infra', '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K', 'Administrator', '2026-01-01T00:00:00Z');
 
   -- Ensure existing seeded users have the correct passwords
   UPDATE users SET password = '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K' WHERE id = 'user_01';
-
-  -- Seed Default Licenses
-  INSERT OR IGNORE INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle)
-  VALUES ();
-
-  -- Seed Default Verification Events
-  INSERT OR IGNORE INTO license_events (id, license_id, event_type, event_data, timestamp)
-  VALUES ();
 `);
 
 // Seed default software products if empty
@@ -183,9 +193,12 @@ export function getAllLicenses(): License[] {
 }
 
 export function createLicense(license: License): License {
+  if (license.profit_share_pct === undefined) {
+    license.profit_share_pct = 15;
+  }
   const stmt = db.prepare(`
-    INSERT INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle)
-    VALUES (@id, @software_name, @tier, @license_key, @status, @issued_to, @hardware_id, @ip_whitelist, @features, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @api_calls_count_daily, @api_calls_count_monthly, @api_calls_count_yearly, @created_at, @expires_at, @product_price, @current_earnings, @daily_earnings, @weekly_earnings, @monthly_earnings, @last_active_ip, @device_fingerprint, @asset_classes, @restricted_accounts, @billing_cycle)
+    INSERT INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle, profit_share_pct)
+    VALUES (@id, @software_name, @tier, @license_key, @status, @issued_to, @hardware_id, @ip_whitelist, @features, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @api_calls_count_daily, @api_calls_count_monthly, @api_calls_count_yearly, @created_at, @expires_at, @product_price, @current_earnings, @daily_earnings, @weekly_earnings, @monthly_earnings, @last_active_ip, @device_fingerprint, @asset_classes, @restricted_accounts, @billing_cycle, @profit_share_pct)
   `);
   stmt.run(license);
   return license;
@@ -292,6 +305,7 @@ export function batchUpdateLicenses(ids: string[], updates: {
   api_calls_limit_monthly?: number;
   api_calls_limit_yearly?: number;
   billing_cycle?: string;
+  profit_share_pct?: number;
   status?: string;
   features?: string;
   asset_classes?: string;
@@ -302,7 +316,7 @@ export function batchUpdateLicenses(ids: string[], updates: {
   const allowedKeys = [
     'expires_at', 'max_volume_usd', 'api_calls_limit', 
     'api_calls_limit_monthly', 'api_calls_limit_yearly', 
-    'billing_cycle', 'status', 'features', 'asset_classes', 'restricted_accounts'
+    'billing_cycle', 'profit_share_pct', 'status', 'features', 'asset_classes', 'restricted_accounts'
   ];
   
   const keys = Object.keys(updates).filter(k => allowedKeys.includes(k) && updates[k as keyof typeof updates] !== undefined);
@@ -358,9 +372,12 @@ export function getAllClients(): Client[] {
 }
 
 export function createClient(client: Client): Client {
+  if (!client.kyc_status) client.kyc_status = 'pending';
+  if (!client.risk_rating) client.risk_rating = 'low';
+  if (!client.aml_status) client.aml_status = 'clear';
   const stmt = db.prepare(`
-    INSERT INTO clients (id, name, email, mobile, address, extra_info)
-    VALUES (@id, @name, @email, @mobile, @address, @extra_info)
+    INSERT INTO clients (id, name, email, mobile, address, extra_info, kyc_status, company_registration_number, tax_id, risk_rating, aml_status, kyc_notes)
+    VALUES (@id, @name, @email, @mobile, @address, @extra_info, @kyc_status, @company_registration_number, @tax_id, @risk_rating, @aml_status, @kyc_notes)
   `);
   stmt.run(client);
   return client;
@@ -579,14 +596,14 @@ export function updateUserPassword(email: string, passwordHash: string): void {
 
 export function checkSQLiteHealth() {
   try {
-    const result = db.pragma('integrity_check');
+    const result = db.pragma('integrity_check', { simple: true });
     const tableCount = (db.prepare("SELECT count(*) as count FROM sqlite_master WHERE type='table'").get() as any).count;
     const connectionStatus = db.open ? 'healthy' : 'disconnected';
     
     return {
       status: result === 'ok' ? 'healthy' : 'corrupted',
       tables: tableCount,
-      journal_mode: db.pragma('journal_mode'),
+      journal_mode: db.pragma('journal_mode', { simple: true }),
       open: db.open,
       connectionStatus
     };
