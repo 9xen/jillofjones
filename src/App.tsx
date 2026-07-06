@@ -246,22 +246,11 @@ export default function App() {
   };
 
   const exportLicensesToCSV = () => {
-    const headers = ['ID', 'Issued To', 'Expires At', 'Status', 'Earnings'];
-    const rows = filteredLicenses.map(l => [
-      l.id,
-      l.issued_to,
-      l.expires_at,
-      l.status,
-      l.earnings
-    ]);
-    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'licenses-export.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    window.location.href = '/api/licenses/export/csv';
+  };
+
+  const exportLicensesToPDF = () => {
+    window.location.href = '/api/licenses/export/pdf';
   };
   const extendLicense = (id: string, days: number) => {
     if (!socketRef.current) return;
@@ -1350,6 +1339,7 @@ export default function App() {
                     </>
                   )}
                   <button onClick={exportLicensesToCSV} className="bg-zinc-700/20 text-zinc-300 border border-zinc-700/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-zinc-700/30">Export CSV</button>
+                  <button onClick={exportLicensesToPDF} className="bg-zinc-700/20 text-zinc-300 border border-zinc-700/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-zinc-700/30">Export PDF</button>
                   {canManageLicenses && (
                     <button onClick={() => executeBulkAction('delete')} className="bg-rose-500/20 text-rose-400 border border-rose-500/20 px-3 py-1.5 rounded text-xs font-semibold hover:bg-rose-500/30">Delete</button>
                   )}
@@ -5638,8 +5628,11 @@ function SoftwareProductsView({
             <thead className="bg-zinc-900/80 border-b border-zinc-800/80 text-zinc-400 font-mono text-[10px] uppercase tracking-wider">
               <tr>
                 <th className="px-6 py-4">Product Name</th>
-                <th className="px-6 py-4">Description</th>
+                <th className="px-6 py-4">Version</th>
+                <th className="px-6 py-4">Status</th>
                 <th className="px-6 py-4">Base License Cost</th>
+                <th className="px-6 py-4">Release Date</th>
+                <th className="px-6 py-4">Support</th>
                 <th className="px-6 py-4">Active Deployments</th>
                 <th className="px-6 py-4 text-right">Actions</th>
               </tr>
@@ -5653,10 +5646,20 @@ function SoftwareProductsView({
                       <Cpu className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
                       {prod.name}
                     </td>
-                    <td className="px-6 py-4 text-zinc-400 text-xs font-sans max-w-xs truncate" title={prod.description}>
-                      {prod.description || 'No description provided'}
+                    <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{prod.version}</td>
+                    <td className="px-6 py-4">
+                      <span className={cn(
+                        "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                        prod.status === 'active' ? "bg-emerald-500/10 text-emerald-400" :
+                        prod.status === 'beta' ? "bg-amber-500/10 text-amber-400" :
+                        "bg-zinc-700/50 text-zinc-300"
+                      )}>
+                        {prod.status}
+                      </span>
                     </td>
                     <td className="px-6 py-4 text-emerald-400 font-mono text-xs">${prod.base_price.toLocaleString()}/mo</td>
+                    <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{prod.release_date}</td>
+                    <td className="px-6 py-4 text-zinc-400 font-mono text-xs uppercase">{prod.support_level}</td>
                     <td className="px-6 py-4 text-zinc-400 font-mono text-xs">{count} active</td>
                     <td className="px-6 py-4 text-right">
 
