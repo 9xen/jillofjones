@@ -5530,7 +5530,9 @@ function SoftwareProductsView({
 }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<SoftwareProduct | null>(null);
-  const [formData, setFormData] = useState({ name: '', description: '', base_price: 5000 });
+  const [formData, setFormData] = useState({ 
+    name: '', description: '', base_price: 5000, version: '1.0.0', status: 'active' as 'active' | 'deprecated' | 'beta', release_date: new Date().toISOString().split('T')[0], maintenance_window: '02:00 UTC', support_level: 'basic' as 'basic' | 'premium' | 'enterprise'
+  });
 
   const handleSubmit = () => {
     if (!formData.name) return;
@@ -5543,9 +5545,11 @@ function SoftwareProductsView({
     }
     setEditingProduct(null);
 
-    setFormData({ name: '', description: '', base_price: 5000 });
+    setFormData({ 
+        name: '', description: '', base_price: 5000, version: '1.0.0', status: 'active', release_date: new Date().toISOString().split('T')[0], maintenance_window: '02:00 UTC', support_level: 'basic'
+    });
     setIsModalOpen(false);
-    showToast('Software product successfully added', 'success');
+    showToast('Software product successfully saved', 'success');
   };
 
   const getProductLicenseCount = (name: string) => {
@@ -5584,9 +5588,41 @@ function SoftwareProductsView({
               <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Description</label>
               <textarea value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} placeholder="Describe key characteristics and target loops..." className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 h-20 placeholder:text-zinc-700" />
             </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Base Price (USD/mo)</label>
+                <input type="number" value={formData.base_price} onChange={e => setFormData({...formData, base_price: Number(e.target.value)})} placeholder="12500" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Version</label>
+                <input type="text" value={formData.version} onChange={e => setFormData({...formData, version: e.target.value})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Status</label>
+                <select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value as any})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono">
+                    <option value="active">Active</option>
+                    <option value="deprecated">Deprecated</option>
+                    <option value="beta">Beta</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Release Date</label>
+                <input type="date" value={formData.release_date} onChange={e => setFormData({...formData, release_date: e.target.value})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Support</label>
+                <select value={formData.support_level} onChange={e => setFormData({...formData, support_level: e.target.value as any})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono">
+                    <option value="basic">Basic</option>
+                    <option value="premium">Premium</option>
+                    <option value="enterprise">Enterprise</option>
+                </select>
+              </div>
+            </div>
             <div>
-              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Base Price (USD/mo)</label>
-              <input type="number" value={formData.base_price} onChange={e => setFormData({...formData, base_price: Number(e.target.value)})} placeholder="12500" className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
+              <label className="block text-[10px] font-mono text-zinc-500 uppercase mb-1.5">Maintenance Window</label>
+              <input type="text" value={formData.maintenance_window} onChange={e => setFormData({...formData, maintenance_window: e.target.value})} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 font-mono" />
             </div>
             <div className="flex justify-end gap-3 pt-2">
               <button onClick={() => setIsModalOpen(false)} className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors font-semibold">Cancel</button>
@@ -5630,7 +5666,12 @@ function SoftwareProductsView({
                           setFormData({
                             name: prod.name,
                             description: prod.description || '',
-                                                        base_price: prod.base_price
+                            base_price: prod.base_price,
+                            version: prod.version,
+                            status: prod.status,
+                            release_date: prod.release_date,
+                            maintenance_window: prod.maintenance_window,
+                            support_level: prod.support_level
                           });
                           setIsModalOpen(true);
                         }}
