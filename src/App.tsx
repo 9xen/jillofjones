@@ -7,7 +7,7 @@ import { jsPDF } from 'jspdf';
 import * as XLSX from 'xlsx';
 import { cn } from './lib/utils';
 import { format, addDays } from 'date-fns';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, RadialBarChart, RadialBar, PieChart, Pie, Cell } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, Line, LineChart, RadialBarChart, RadialBar, PieChart, Pie, Cell } from 'recharts';
 import { LoginPage } from './components/LoginPage';
 import { ValidateKeyView } from './components/ValidateKeyView';
 import { generateSecureLicenseKey } from './lib/licenseKeyUtils';
@@ -23,6 +23,8 @@ export const getLicenseFee = (license: License): number => {
 
 export default function App() {
   const [licenses, setLicenses] = useState<License[]>([]);
+  const [isLiveSyncEnabled, setIsLiveSyncEnabled] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [connected, setConnected] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [search, setSearch] = useState('');
@@ -148,6 +150,38 @@ export default function App() {
       console.error("Failed to fetch DuckDB risk scores:", err);
     }
   };
+
+  const fetchFreshData = async () => {
+    if (localStorage.getItem('nonaxen_static_mode') === 'true') {
+      return;
+    }
+    setIsSyncing(true);
+    try {
+      const resLicenses = await fetch('/api/licenses');
+      if (resLicenses.ok) {
+        const data = await resLicenses.json();
+        setLicenses(data);
+      }
+      await fetchRiskScores();
+    } catch (err) {
+      console.error("Live Sync data fetch error:", err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isLiveSyncEnabled) return;
+    
+    // Initial fetch on mount or toggle on
+    fetchFreshData();
+
+    const interval = setInterval(() => {
+      fetchFreshData();
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, [isLiveSyncEnabled]);
 
   // RBAC Permission Helpers
   const canManageLicenses = currentUser?.role === 'Administrator' || currentUser?.role === 'Manager' || currentUser?.role === 'User';
@@ -1192,6 +1226,38 @@ export default function App() {
               </h2>
             </div>
             <div className="flex items-center gap-4">
+              {/* Live Sync Toggle */}
+              <div className="flex items-center gap-2.5 bg-zinc-950/45 border border-zinc-800/60 rounded-lg px-2.5 py-1 shrink-0 select-none">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    {isLiveSyncEnabled && (
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    )}
+                    <span className={cn("relative inline-flex rounded-full h-2 w-2", isLiveSyncEnabled ? "bg-emerald-500" : "bg-zinc-600")}></span>
+                  </span>
+                  <span className="text-[10px] font-mono font-semibold tracking-wider text-zinc-400 uppercase hidden sm:inline">
+                    {isSyncing ? 'SYNCING...' : 'LIVE SYNC'}
+                  </span>
+                </div>
+                <button
+                  id="live-sync-toggle"
+                  onClick={() => setIsLiveSyncEnabled(!isLiveSyncEnabled)}
+                  className={cn(
+                    "relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                    isLiveSyncEnabled ? "bg-indigo-500/80" : "bg-zinc-800"
+                  )}
+                  role="switch"
+                  aria-checked={isLiveSyncEnabled}
+                >
+                  <span
+                    className={cn(
+                      "pointer-events-none inline-block h-3 w-3 transform rounded-full bg-zinc-100 shadow-lg ring-0 transition duration-200 ease-in-out",
+                      isLiveSyncEnabled ? "translate-x-3" : "translate-x-0"
+                    )}
+                  />
+                </button>
+              </div>
+
               {activeTab === 'licenses' && canManageLicenses && (
                 <button 
                   onClick={() => setIsCreateModalOpen(true)}
@@ -2946,6 +3012,142 @@ function NodesView({
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [rttHistory, setRttHistory] = useState<Record<string, { rtt: number; time: number }[]>>({});
+  const [chartWindow, setChartWindow] = useState<'1m' | '3m' | '5m'>('5m');
+
+  const LINE_COLORS = [
+    '#6366f1', // Indigo
+    '#10b981', // Emerald
+    '#f59e0b', // Amber
+    '#ec4899', // Pink
+    '#06b6d4', // Cyan
+    '#a855f7', // Purple
+    '#f97316', // Orange
+    '#f43f5e', // Rose
+  ];
+
+  const keysToPlot = selectedKeys.length > 0 
+    ? selectedKeys.filter(k => liveWebSocketNodes.some(n => n.license_key === k))
+    : liveWebSocketNodes.map(n => n.license_key);
+
+  const generateChartData = () => {
+    const now = Date.now();
+    let windowMs = 5 * 60 * 1000;
+    let stepMs = 10 * 1000; // 10s step for 5m -> 30 points
+
+    if (chartWindow === '1m') {
+      windowMs = 1 * 60 * 1000;
+      stepMs = 3 * 1000; // 3s step for 1m -> 20 points
+    } else if (chartWindow === '3m') {
+      windowMs = 3 * 60 * 1000;
+      stepMs = 6 * 1000; // 6s step for 3m -> 30 points
+    }
+
+    const points: any[] = [];
+    if (keysToPlot.length === 0) return [];
+
+    const lastKnownRtt: Record<string, number> = {};
+
+    keysToPlot.forEach(key => {
+      const history = rttHistory[key] || [];
+      const windowStart = now - windowMs;
+      const preWindowPoints = history.filter(h => h.time < windowStart);
+      if (preWindowPoints.length > 0) {
+        lastKnownRtt[key] = preWindowPoints[preWindowPoints.length - 1].rtt;
+      }
+    });
+
+    for (let time = now - windowMs; time <= now; time += stepMs) {
+      const timeLabel = new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const point: any = { time, timeLabel };
+
+      keysToPlot.forEach(key => {
+        const history = rttHistory[key] || [];
+        const bucketPoints = history.filter(h => h.time >= time - stepMs && h.time < time);
+        
+        if (bucketPoints.length > 0) {
+          const avgRtt = bucketPoints.reduce((sum, h) => sum + h.rtt, 0) / bucketPoints.length;
+          point[key] = Math.round(avgRtt);
+          lastKnownRtt[key] = Math.round(avgRtt);
+        } else if (lastKnownRtt[key] !== undefined) {
+          point[key] = lastKnownRtt[key];
+        }
+      });
+
+      points.push(point);
+    }
+
+    return points;
+  };
+
+  const getBottleneckStats = () => {
+    let bottleneckCount = 0;
+    let totalPoints = 0;
+    let sumRtt = 0;
+    let maxPlottedRtt = 0;
+    let minPlottedRtt = Infinity;
+
+    const now = Date.now();
+    let windowMs = 5 * 60 * 1000;
+    if (chartWindow === '1m') windowMs = 1 * 60 * 1000;
+    else if (chartWindow === '3m') windowMs = 3 * 60 * 1000;
+
+    keysToPlot.forEach(key => {
+      const history = rttHistory[key] || [];
+      const windowPoints = history.filter(h => now - h.time <= windowMs);
+      
+      windowPoints.forEach(h => {
+        totalPoints++;
+        sumRtt += h.rtt;
+        if (h.rtt > latencyThreshold) {
+          bottleneckCount++;
+        }
+        if (h.rtt > maxPlottedRtt) maxPlottedRtt = h.rtt;
+        if (h.rtt < minPlottedRtt) minPlottedRtt = h.rtt;
+      });
+    });
+
+    return {
+      bottleneckCount,
+      avgRttInWindow: totalPoints > 0 ? Math.round(sumRtt / totalPoints) : null,
+      maxRttInWindow: totalPoints > 0 ? maxPlottedRtt : null,
+      minRttInWindow: totalPoints > 0 && minPlottedRtt !== Infinity ? minPlottedRtt : null,
+    };
+  };
+
+  const chartData = generateChartData();
+  const stats = getBottleneckStats();
+
+  const CustomChartTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-zinc-950/95 border border-zinc-850 rounded-lg p-3 shadow-xl backdrop-blur-md">
+          <div className="text-[10px] font-mono text-zinc-500 mb-1.5 font-bold uppercase tracking-wider">{label}</div>
+          <div className="space-y-1.5 max-h-40 overflow-y-auto">
+            {payload.map((entry: any, idx: number) => {
+              const rtt = entry.value;
+              const isExceeded = rtt >= latencyThreshold;
+              const nodeInfo = liveWebSocketNodes.find(n => n.license_key === entry.name);
+              return (
+                <div key={idx} className="flex items-center justify-between gap-4 text-xs font-mono">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
+                    <span className="text-zinc-300 text-[10px] font-semibold">{entry.name.substring(0, 8)}... ({nodeInfo?.ip || 'IP'})</span>
+                  </div>
+                  <span className={cn(
+                    "font-bold",
+                    isExceeded ? "text-rose-400" : rtt >= latencyThreshold / 3 ? "text-amber-400" : "text-emerald-400"
+                  )}>
+                    {rtt}ms
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+    return null;
+  };
 
   useEffect(() => {
     const now = Date.now();
@@ -3565,6 +3767,182 @@ function NodesView({
               </div>
             )}
           </div>
+        </div>
+
+        {/* Real-time WebSocket RTT Latency Telemetry Chart */}
+        <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-xl p-6 backdrop-blur-sm relative overflow-hidden">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+            <div className="space-y-1">
+              <h3 className="text-zinc-100 font-semibold flex items-center gap-2">
+                <Activity className="w-4 h-4 text-indigo-400 animate-pulse" />
+                Real-Time WebSocket RTT Telemetry
+              </h3>
+              <p className="text-xs text-zinc-500 font-mono">Live WebSocket round-trip time (RTT) latency over the last 5 minutes</p>
+            </div>
+            
+            {/* Controls */}
+            {liveWebSocketNodes.length > 0 && (
+              <div className="flex items-center gap-2">
+                {/* Window buttons */}
+                <div className="flex bg-zinc-950 border border-zinc-800 rounded-lg p-0.5 text-[9px] font-mono">
+                  {(['1m', '3m', '5m'] as const).map(w => (
+                    <button
+                      key={w}
+                      type="button"
+                      onClick={() => setChartWindow(w)}
+                      className={cn(
+                        "px-2 py-1 rounded font-bold uppercase transition-all",
+                        chartWindow === w 
+                          ? "bg-indigo-500/15 text-indigo-400 border border-indigo-500/25" 
+                          : "text-zinc-500 hover:text-zinc-300 border border-transparent"
+                      )}
+                    >
+                      {w === '1m' ? '1 MIN' : w === '3m' ? '3 MIN' : '5 MIN'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {liveWebSocketNodes.length > 0 ? (
+            <div className="space-y-6">
+              {/* Telemetry Stats Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-zinc-950/40 border border-zinc-850/60 p-3.5 rounded-lg">
+                <div className="space-y-0.5">
+                  <span className="text-[9px] font-mono text-zinc-500 uppercase block">Active Lines</span>
+                  <span className="text-xs font-mono font-bold text-zinc-200">{keysToPlot.length} plotted</span>
+                </div>
+                
+                <div className="space-y-0.5">
+                  <span className="text-[9px] font-mono text-zinc-500 uppercase block">Bottlenecks Detected</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className={cn(
+                      "text-xs font-mono font-bold",
+                      stats.bottleneckCount > 0 ? "text-rose-400 animate-pulse" : "text-emerald-400"
+                    )}>
+                      {stats.bottleneckCount} alerts
+                    </span>
+                    {stats.bottleneckCount > 0 && (
+                      <span className="bg-rose-500/10 text-rose-400 text-[8px] font-extrabold px-1.5 py-0.2 rounded uppercase border border-rose-500/20">
+                        ANOMALOUS
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-0.5">
+                  <span className="text-[9px] font-mono text-zinc-500 uppercase block">Peak RTT (Window)</span>
+                  <span className={cn(
+                    "text-xs font-mono font-bold",
+                    stats.maxRttInWindow !== null && stats.maxRttInWindow >= latencyThreshold ? "text-rose-400" : "text-zinc-200"
+                  )}>
+                    {stats.maxRttInWindow !== null ? `${stats.maxRttInWindow}ms` : 'N/A'}
+                  </span>
+                </div>
+
+                <div className="space-y-0.5">
+                  <span className="text-[9px] font-mono text-zinc-500 uppercase block">Min RTT (Window)</span>
+                  <span className="text-xs font-mono font-bold text-emerald-400">
+                    {stats.minRttInWindow !== null ? `${stats.minRttInWindow}ms` : 'N/A'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Line Chart */}
+              <div className="h-64 w-full relative">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={chartData} margin={{ top: 10, right: 10, left: -25, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis 
+                      dataKey="timeLabel" 
+                      stroke="#71717a" 
+                      fontSize={8} 
+                      fontFamily="JetBrains Mono, ui-monospace"
+                      tickLine={false} 
+                      axisLine={false}
+                      dy={10}
+                    />
+                    <YAxis 
+                      stroke="#71717a" 
+                      fontSize={8} 
+                      fontFamily="JetBrains Mono, ui-monospace"
+                      tickLine={false} 
+                      axisLine={false}
+                      dx={-5}
+                      unit="ms"
+                    />
+                    <Tooltip content={<CustomChartTooltip />} cursor={{ stroke: '#3f3f46', strokeWidth: 1 }} />
+                    {keysToPlot.map((key, index) => {
+                      const color = LINE_COLORS[index % LINE_COLORS.length];
+                      return (
+                        <Line
+                          key={key}
+                          type="monotone"
+                          dataKey={key}
+                          stroke={color}
+                          strokeWidth={2}
+                          dot={false}
+                          activeDot={{ r: 4, stroke: '#09090b', strokeWidth: 1 }}
+                          name={key}
+                          connectNulls
+                        />
+                      );
+                    })}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Chart Legend / Custom Filter Toggles */}
+              <div className="space-y-2">
+                <div className="text-[9px] font-mono text-zinc-500 uppercase font-bold tracking-wider">
+                  Plotted Pipes (Toggle checkboxes above to select/deselect specific pipelines)
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {keysToPlot.map((key, index) => {
+                    const color = LINE_COLORS[index % LINE_COLORS.length];
+                    const node = liveWebSocketNodes.find(n => n.license_key === key);
+                    const isExceeded = node?.rtt !== undefined && node.rtt > latencyThreshold;
+                    return (
+                      <div 
+                        key={key}
+                        className={cn(
+                          "flex items-center gap-2 bg-zinc-950/65 border border-zinc-850 rounded-lg px-2.5 py-1.5 text-[10px] font-mono",
+                          isExceeded && "border-rose-900/40 bg-rose-950/10"
+                        )}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
+                        <span className="text-zinc-300 font-semibold">{key.substring(0, 10)}...</span>
+                        <span className="text-zinc-500 font-normal">({node?.ip || 'IP'})</span>
+                        <span className={cn(
+                          "font-bold ml-1 px-1.5 py-0.2 rounded border text-[8px]",
+                          isExceeded 
+                            ? "text-rose-400 bg-rose-950/30 border-rose-900/40 animate-pulse" 
+                            : node?.rtt !== undefined && node.rtt >= latencyThreshold / 3 
+                              ? "text-amber-400 bg-amber-950/30 border-amber-900/40"
+                              : "text-emerald-400 bg-emerald-950/30 border-emerald-900/40"
+                        )}>
+                          {node?.rtt !== undefined ? `${node.rtt}ms` : 'N/A'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-16 border border-dashed border-zinc-800/80 rounded-lg bg-zinc-950/10 space-y-3">
+              <div className="p-3 bg-zinc-900/80 border border-zinc-800 rounded-xl text-zinc-500">
+                <Activity className="w-6 h-6 animate-pulse" />
+              </div>
+              <div className="text-center space-y-1">
+                <div className="text-xs font-mono font-bold text-zinc-400">NO ACTIVE TELEMETRY STREAMS</div>
+                <div className="text-[10px] font-mono text-zinc-500 max-w-sm">
+                  Handshake a pipeline session in the <span className="text-amber-400">WS Validation Console</span> to begin graphing RTT latency bottleneck metrics.
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

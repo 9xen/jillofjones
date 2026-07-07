@@ -1834,6 +1834,14 @@ async function notifyUsers(event: string, subject: string, text: string) {
     }
   });
 
+  app.get("/api/licenses", (req, res) => {
+    try {
+      res.json(getAllLicenses());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   app.get("/api/licenses/export/csv", (req, res) => {
     try {
       const licenses = getAllLicenses();

@@ -48,48 +48,7 @@ db.exec(`
     billing_cycle TEXT DEFAULT 'onetime',
     profit_share_pct REAL DEFAULT 15
   );
-`);
 
-// Migration: Add software_products columns if missing
-const spColumns = db.prepare("PRAGMA table_info(software_products)").all() as any[];
-const spColumnNames = spColumns.map(c => c.name);
-if (!spColumnNames.includes('version')) db.exec("ALTER TABLE software_products ADD COLUMN version TEXT DEFAULT '1.0.0'");
-if (!spColumnNames.includes('status')) db.exec("ALTER TABLE software_products ADD COLUMN status TEXT DEFAULT 'active'");
-if (!spColumnNames.includes('release_date')) db.exec("ALTER TABLE software_products ADD COLUMN release_date TEXT DEFAULT ''");
-if (!spColumnNames.includes('maintenance_window')) db.exec("ALTER TABLE software_products ADD COLUMN maintenance_window TEXT DEFAULT ''");
-if (!spColumnNames.includes('support_level')) db.exec("ALTER TABLE software_products ADD COLUMN support_level TEXT DEFAULT 'basic'");
-
-// Migration: Add license_tiers columns if missing
-const ltColumns = db.prepare("PRAGMA table_info(license_tiers)").all() as any[];
-const ltColumnNames = ltColumns.map(c => c.name);
-if (!ltColumnNames.includes('features')) db.exec("ALTER TABLE license_tiers ADD COLUMN features TEXT DEFAULT '[]'");
-if (!ltColumnNames.includes('sla_guarantee')) db.exec("ALTER TABLE license_tiers ADD COLUMN sla_guarantee TEXT DEFAULT 'none'");
-if (!ltColumnNames.includes('support_type')) db.exec("ALTER TABLE license_tiers ADD COLUMN support_type TEXT DEFAULT 'email'");
-if (!ltColumnNames.includes('custom_fields')) db.exec("ALTER TABLE license_tiers ADD COLUMN custom_fields TEXT DEFAULT '{}'");
-
-// Migration: Add billing_cycle if missing
-try {
-  db.prepare("SELECT billing_cycle FROM licenses LIMIT 1").get();
-} catch (e) {
-  try {
-    db.exec("ALTER TABLE licenses ADD COLUMN billing_cycle TEXT DEFAULT 'onetime'");
-  } catch (err) {
-    console.error("Migration failed:", err);
-  }
-}
-
-// Migration: Add profit_share_pct if missing
-try {
-  db.prepare("SELECT profit_share_pct FROM licenses LIMIT 1").get();
-} catch (e) {
-  try {
-    db.exec("ALTER TABLE licenses ADD COLUMN profit_share_pct REAL DEFAULT 15");
-  } catch (err) {
-    console.error("Migration failed for profit_share_pct:", err);
-  }
-}
-
-db.exec(`
   CREATE TABLE IF NOT EXISTS license_events (
     id TEXT PRIMARY KEY,
     license_id TEXT NOT NULL,
@@ -120,7 +79,12 @@ db.exec(`
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
-    base_price REAL NOT NULL
+    base_price REAL NOT NULL,
+    version TEXT DEFAULT '1.0.0',
+    status TEXT DEFAULT 'active',
+    release_date TEXT DEFAULT '',
+    maintenance_window TEXT DEFAULT '',
+    support_level TEXT DEFAULT 'basic'
   );
 
   -- Create License Tiers table
@@ -131,7 +95,11 @@ db.exec(`
     api_calls_limit INTEGER NOT NULL,
     api_calls_limit_monthly INTEGER NOT NULL DEFAULT 0,
     api_calls_limit_yearly INTEGER NOT NULL DEFAULT 0,
-    description TEXT
+    description TEXT,
+    features TEXT DEFAULT '[]',
+    sla_guarantee TEXT DEFAULT 'none',
+    support_type TEXT DEFAULT 'email',
+    custom_fields TEXT DEFAULT '{}'
   );
 
   -- Create Audit Schedule table
@@ -195,14 +163,353 @@ db.exec(`
   UPDATE users SET password = '$2b$10$klPN26ona5o53jkn1j/vM.28EzGuX063Flv2B4CiBa2OhBOLkHE9K' WHERE id = 'user_01';
 `);
 
+// Migration: Add software_products columns if missing
+const spColumns = db.prepare("PRAGMA table_info(software_products)").all() as any[];
+const spColumnNames = spColumns.map(c => c.name);
+if (!spColumnNames.includes('version')) db.exec("ALTER TABLE software_products ADD COLUMN version TEXT DEFAULT '1.0.0'");
+if (!spColumnNames.includes('status')) db.exec("ALTER TABLE software_products ADD COLUMN status TEXT DEFAULT 'active'");
+if (!spColumnNames.includes('release_date')) db.exec("ALTER TABLE software_products ADD COLUMN release_date TEXT DEFAULT ''");
+if (!spColumnNames.includes('maintenance_window')) db.exec("ALTER TABLE software_products ADD COLUMN maintenance_window TEXT DEFAULT ''");
+if (!spColumnNames.includes('support_level')) db.exec("ALTER TABLE software_products ADD COLUMN support_level TEXT DEFAULT 'basic'");
+
+// Migration: Add license_tiers columns if missing
+const ltColumns = db.prepare("PRAGMA table_info(license_tiers)").all() as any[];
+const ltColumnNames = ltColumns.map(c => c.name);
+if (!ltColumnNames.includes('features')) db.exec("ALTER TABLE license_tiers ADD COLUMN features TEXT DEFAULT '[]'");
+if (!ltColumnNames.includes('sla_guarantee')) db.exec("ALTER TABLE license_tiers ADD COLUMN sla_guarantee TEXT DEFAULT 'none'");
+if (!ltColumnNames.includes('support_type')) db.exec("ALTER TABLE license_tiers ADD COLUMN support_type TEXT DEFAULT 'email'");
+if (!ltColumnNames.includes('custom_fields')) db.exec("ALTER TABLE license_tiers ADD COLUMN custom_fields TEXT DEFAULT '{}'");
+
+// Migration: Add billing_cycle if missing
+try {
+  db.prepare("SELECT billing_cycle FROM licenses LIMIT 1").get();
+} catch (e) {
+  try {
+    db.exec("ALTER TABLE licenses ADD COLUMN billing_cycle TEXT DEFAULT 'onetime'");
+  } catch (err) {
+    console.error("Migration failed:", err);
+  }
+}
+
+// Migration: Add profit_share_pct if missing
+try {
+  db.prepare("SELECT profit_share_pct FROM licenses LIMIT 1").get();
+} catch (e) {
+  try {
+    db.exec("ALTER TABLE licenses ADD COLUMN profit_share_pct REAL DEFAULT 15");
+  } catch (err) {
+    console.error("Migration failed for profit_share_pct:", err);
+  }
+}
+
 // Seed default software products if empty
 const softwareCount = (db.prepare('SELECT COUNT(*) as count FROM software_products').get() as any).count;
+if (softwareCount === 0) {
+  const insertProduct = db.prepare(`
+    INSERT INTO software_products (id, name, description, base_price, version, status, release_date, maintenance_window, support_level)
+    VALUES (@id, @name, @description, @base_price, @version, @status, @release_date, @maintenance_window, @support_level)
+  `);
+  
+  insertProduct.run({
+    id: 'prod_01',
+    name: 'QuantMaster HFT',
+    description: 'High-frequency trading terminal for multi-exchange arbitrage and low-latency order execution.',
+    base_price: 15000,
+    version: '2.4.1',
+    status: 'active',
+    release_date: '2026-01-15',
+    maintenance_window: '02:00-03:00 UTC',
+    support_level: 'enterprise'
+  });
+
+  insertProduct.run({
+    id: 'prod_02',
+    name: 'SentimentFlow AI',
+    description: 'AI-driven sentiment analysis engine parsing real-time financial news, social feeds, and market announcements.',
+    base_price: 4500,
+    version: '1.2.0',
+    status: 'active',
+    release_date: '2026-03-10',
+    maintenance_window: '04:00-04:30 UTC',
+    support_level: 'premium'
+  });
+
+  insertProduct.run({
+    id: 'prod_03',
+    name: 'Nexus Arbitrage Core',
+    description: 'Cross-asset triangular arbitrage core with direct market access (DMA) gateways.',
+    base_price: 9500,
+    version: '3.0.0-beta',
+    status: 'beta',
+    release_date: '2026-06-01',
+    maintenance_window: '01:00-02:00 UTC',
+    support_level: 'premium'
+  });
+}
 
 // Seed default tiers if empty
 const tierCount = (db.prepare('SELECT COUNT(*) as count FROM license_tiers').get() as any).count;
+if (tierCount === 0) {
+  const insertTier = db.prepare(`
+    INSERT INTO license_tiers (id, name, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, description, features, sla_guarantee, support_type, custom_fields)
+    VALUES (@id, @name, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @description, @features, @sla_guarantee, @support_type, @custom_fields)
+  `);
+
+  insertTier.run({
+    id: 'tier_01',
+    name: 'Standard',
+    max_volume_usd: 5000000,
+    api_calls_limit: 10000,
+    api_calls_limit_monthly: 250000,
+    api_calls_limit_yearly: 3000000,
+    description: 'Standard tier for emerging retail algorithmic funds.',
+    features: JSON.stringify(['Sentiment']),
+    sla_guarantee: '99.9%',
+    support_type: 'email',
+    custom_fields: JSON.stringify({ allowed_pairs: ['BTCUSD', 'ETHUSD'] })
+  });
+
+  insertTier.run({
+    id: 'tier_02',
+    name: 'Professional',
+    max_volume_usd: 50000000,
+    api_calls_limit: 50000,
+    api_calls_limit_monthly: 1500000,
+    api_calls_limit_yearly: 18000000,
+    description: 'Professional tier for established boutique asset managers and active proprietary desks.',
+    features: JSON.stringify(['Sentiment', 'HFT']),
+    sla_guarantee: '99.95%',
+    support_type: 'chat',
+    custom_fields: JSON.stringify({ max_leverage: '20x', allowed_pairs: ['ALL'] })
+  });
+
+  insertTier.run({
+    id: 'tier_03',
+    name: 'Institutional',
+    max_volume_usd: 1000000000,
+    api_calls_limit: 500000,
+    api_calls_limit_monthly: 15000000,
+    api_calls_limit_yearly: 180000000,
+    description: 'Institutional grade license for tier-1 funds, investment banks, and enterprise market makers.',
+    features: JSON.stringify(['Sentiment', 'HFT', 'Dark Pool']),
+    sla_guarantee: '99.99%',
+    support_type: 'dedicated',
+    custom_fields: JSON.stringify({ max_leverage: '100x', co_location: 'NY4/LD4' })
+  });
+}
 
 // Seed default clients if empty
 const clientCount = (db.prepare('SELECT COUNT(*) as count FROM clients').get() as any).count;
+if (clientCount === 0) {
+  const insertClient = db.prepare(`
+    INSERT INTO clients (id, name, email, mobile, address, extra_info, kyc_status, company_registration_number, tax_id, risk_rating, aml_status, kyc_notes)
+    VALUES (@id, @name, @email, @mobile, @address, @extra_info, @kyc_status, @company_registration_number, @tax_id, @risk_rating, @aml_status, @kyc_notes)
+  `);
+
+  insertClient.run({
+    id: 'cli_01',
+    name: 'Apex Capital Solutions',
+    email: 'compliance@apexcap.io',
+    mobile: '+1 (555) 019-2831',
+    address: '120 Broadway, New York, NY 10271',
+    extra_info: JSON.stringify({ founded: '2018', aum_millions: 450 }),
+    kyc_status: 'approved',
+    company_registration_number: 'CRN-984310-A',
+    tax_id: 'TX-44-9812-C',
+    risk_rating: 'low',
+    aml_status: 'clear',
+    kyc_notes: 'Full compliance audit completed. Beneficial owners verified.'
+  });
+
+  insertClient.run({
+    id: 'cli_02',
+    name: 'Blackwood Quantitative',
+    email: 'ops@blackwoodquant.de',
+    mobile: '+49 89 2019482',
+    address: 'Maximilianstrasse 35, 80539 Munich, Germany',
+    extra_info: JSON.stringify({ founded: '2021', aum_millions: 85 }),
+    kyc_status: 'approved',
+    company_registration_number: 'HRB-112233-M',
+    tax_id: 'DE-99118833',
+    risk_rating: 'medium',
+    aml_status: 'clear',
+    kyc_notes: 'EU regulated entity. Annual AML review passed.'
+  });
+
+  insertClient.run({
+    id: 'cli_03',
+    name: 'Suspect Trading Ltd',
+    email: 'anonymous@hushmail.com',
+    mobile: '+1 (555) 014-9922',
+    address: 'Unknown, Tortola, British Virgin Islands',
+    extra_info: JSON.stringify({ founded: '2025', aum_millions: 1.2 }),
+    kyc_status: 'pending',
+    company_registration_number: 'BVI-90124',
+    tax_id: 'None',
+    risk_rating: 'high',
+    aml_status: 'flagged',
+    kyc_notes: 'Flagged due to shell company structure in offshore jurisdiction and high-risk domain.'
+  });
+}
+
+// Seed default licenses if empty
+const licenseCount = (db.prepare('SELECT COUNT(*) as count FROM licenses').get() as any).count;
+if (licenseCount === 0) {
+  const insertLicense = db.prepare(`
+    INSERT INTO licenses (id, software_name, tier, license_key, status, issued_to, hardware_id, ip_whitelist, features, max_volume_usd, api_calls_limit, api_calls_limit_monthly, api_calls_limit_yearly, api_calls_count_daily, api_calls_count_monthly, api_calls_count_yearly, created_at, expires_at, product_price, current_earnings, daily_earnings, weekly_earnings, monthly_earnings, last_active_ip, device_fingerprint, asset_classes, restricted_accounts, billing_cycle, profit_share_pct)
+    VALUES (@id, @software_name, @tier, @license_key, @status, @issued_to, @hardware_id, @ip_whitelist, @features, @max_volume_usd, @api_calls_limit, @api_calls_limit_monthly, @api_calls_limit_yearly, @api_calls_count_daily, @api_calls_count_monthly, @api_calls_count_yearly, @created_at, @expires_at, @product_price, @current_earnings, @daily_earnings, @weekly_earnings, @monthly_earnings, @last_active_ip, @device_fingerprint, @asset_classes, @restricted_accounts, @billing_cycle, @profit_share_pct)
+  `);
+
+  insertLicense.run({
+    id: 'lic_01',
+    software_name: 'QuantMaster HFT',
+    tier: 'Institutional',
+    license_key: 'NX-HFT-INST-8843-9921-X',
+    status: 'active',
+    issued_to: 'Apex Capital Solutions',
+    hardware_id: 'HWID-APEX-NY4-8891',
+    ip_whitelist: '198.51.100.45, 198.51.100.46',
+    features: JSON.stringify(['Sentiment', 'HFT', 'Dark Pool']),
+    max_volume_usd: 1000000000,
+    api_calls_limit: 500000,
+    api_calls_limit_monthly: 15000000,
+    api_calls_limit_yearly: 180000000,
+    api_calls_count_daily: 24500,
+    api_calls_count_monthly: 1205000,
+    api_calls_count_yearly: 14500000,
+    created_at: '2026-01-20T12:00:00Z',
+    expires_at: '2027-01-20T12:00:00Z',
+    product_price: 15000,
+    current_earnings: 1254300,
+    daily_earnings: 12300,
+    weekly_earnings: 84500,
+    monthly_earnings: 345000,
+    last_active_ip: '198.51.100.45',
+    device_fingerprint: 'FPR-APEX-9843-A',
+    asset_classes: JSON.stringify(['forex', 'crypto']),
+    restricted_accounts: JSON.stringify(['AC-APEX-01', 'AC-APEX-02']),
+    billing_cycle: 'profit_share',
+    profit_share_pct: 15
+  });
+
+  insertLicense.run({
+    id: 'lic_02',
+    software_name: 'SentimentFlow AI',
+    tier: 'Professional',
+    license_key: 'NX-SFLOW-PRO-1102-8833-Y',
+    status: 'active',
+    issued_to: 'Blackwood Quantitative',
+    hardware_id: 'HWID-BLACKWOOD-1111',
+    ip_whitelist: '192.0.2.1',
+    features: JSON.stringify(['Sentiment', 'HFT']),
+    max_volume_usd: 50000000,
+    api_calls_limit: 50000,
+    api_calls_limit_monthly: 1500000,
+    api_calls_limit_yearly: 18000000,
+    api_calls_count_daily: 4100,
+    api_calls_count_monthly: 132000,
+    api_calls_count_yearly: 1540000,
+    created_at: '2026-03-15T08:30:00Z',
+    expires_at: '2027-03-15T08:30:00Z',
+    product_price: 4500,
+    current_earnings: 87400,
+    daily_earnings: 1450,
+    weekly_earnings: 9800,
+    monthly_earnings: 42500,
+    last_active_ip: '192.0.2.1',
+    device_fingerprint: 'FPR-BW-2019-B',
+    asset_classes: JSON.stringify(['crypto', 'stocks']),
+    restricted_accounts: JSON.stringify(['AC-BW-01']),
+    billing_cycle: 'monthly',
+    profit_share_pct: 15
+  });
+
+  insertLicense.run({
+    id: 'lic_03',
+    software_name: 'Nexus Arbitrage Core',
+    tier: 'Professional',
+    license_key: 'NX-NEXUS-PRO-9944-1249-Z',
+    status: 'suspended',
+    issued_to: 'Suspect Trading Ltd',
+    hardware_id: 'HWID-SUSPECT-9999',
+    ip_whitelist: '185.190.140.12',
+    features: JSON.stringify(['Sentiment', 'HFT']),
+    max_volume_usd: 50000000,
+    api_calls_limit: 50000,
+    api_calls_limit_monthly: 1500000,
+    api_calls_limit_yearly: 18000000,
+    api_calls_count_daily: 120,
+    api_calls_count_monthly: 3200,
+    api_calls_count_yearly: 12400,
+    created_at: '2026-06-10T14:22:00Z',
+    expires_at: '2026-12-10T14:22:00Z',
+    product_price: 9500,
+    current_earnings: 4300,
+    daily_earnings: 0,
+    weekly_earnings: 0,
+    monthly_earnings: 4300,
+    last_active_ip: '185.190.140.12',
+    device_fingerprint: 'FPR-SUSPECT-3311-C',
+    asset_classes: JSON.stringify(['forex', 'crypto', 'stocks']),
+    restricted_accounts: JSON.stringify([]),
+    billing_cycle: 'monthly',
+    profit_share_pct: 15
+  });
+
+  // Seed default license events for DuckDB analytics!
+  const insertEvent = db.prepare(`
+    INSERT INTO license_events (id, license_id, event_type, event_data, timestamp)
+    VALUES (@id, @license_id, @event_type, @event_data, @timestamp)
+  `);
+
+  insertEvent.run({
+    id: 'ev_apex_01',
+    license_id: 'lic_01',
+    event_type: 'verification_success',
+    event_data: JSON.stringify({ ip: '198.51.100.45', hardware_id: 'HWID-APEX-NY4-8891' }),
+    timestamp: '2026-07-06T10:00:00Z'
+  });
+
+  insertEvent.run({
+    id: 'ev_apex_02',
+    license_id: 'lic_01',
+    event_type: 'verification_success',
+    event_data: JSON.stringify({ ip: '198.51.100.46', hardware_id: 'HWID-APEX-NY4-8891' }),
+    timestamp: '2026-07-06T12:00:00Z'
+  });
+
+  insertEvent.run({
+    id: 'ev_bw_01',
+    license_id: 'lic_02',
+    event_type: 'verification_success',
+    event_data: JSON.stringify({ ip: '192.0.2.1', hardware_id: 'HWID-BLACKWOOD-1111' }),
+    timestamp: '2026-07-06T09:00:00Z'
+  });
+
+  insertEvent.run({
+    id: 'ev_sus_01',
+    license_id: 'lic_03',
+    event_type: 'verification_failed',
+    event_data: JSON.stringify({ reason: 'IP not whitelisted', ip: '185.190.140.99', provided_hwid: 'HWID-SUSPECT-9999' }),
+    timestamp: '2026-07-06T11:00:00Z'
+  });
+
+  insertEvent.run({
+    id: 'ev_sus_02',
+    license_id: 'lic_03',
+    event_type: 'verification_failed',
+    event_data: JSON.stringify({ reason: 'Hardware ID mismatch', ip: '185.190.140.12', provided_hwid: 'HWID-CLONED-DEVICE' }),
+    timestamp: '2026-07-06T11:30:00Z'
+  });
+
+  insertEvent.run({
+    id: 'ev_sus_03',
+    license_id: 'lic_03',
+    event_type: 'verification_failed',
+    event_data: JSON.stringify({ reason: 'IP not whitelisted', ip: '109.244.12.5', provided_hwid: 'HWID-CLONED-DEVICE' }),
+    timestamp: '2026-07-06T11:45:00Z'
+  });
+}
 
 export function getAllLicenses(): License[] {
   return db.prepare('SELECT * FROM licenses ORDER BY created_at DESC').all() as License[];
