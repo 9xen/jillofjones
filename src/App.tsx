@@ -983,7 +983,15 @@ export default function App() {
     
     return matchesSearch && matchesStatus && matchesTier && matchesAssetClass && matchesDate;
   }).sort((a, b) => {
-    if (!sortConfig) return 0;
+    if (!sortConfig) {
+      const scoreA = duckDBRiskScores[a.id]?.risk_score ?? calculateRiskScore(a);
+      const scoreB = duckDBRiskScores[b.id]?.risk_score ?? calculateRiskScore(b);
+      const isHighA = scoreA > 70;
+      const isHighB = scoreB > 70;
+      if (isHighA && !isHighB) return -1;
+      if (!isHighA && isHighB) return 1;
+      return scoreB - scoreA; // Secondary sort: highest risk scores first
+    }
     const { key, direction } = sortConfig;
     let aValue = a[key as keyof License] ?? '';
     let bValue = b[key as keyof License] ?? '';
