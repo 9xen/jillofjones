@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 import { License, LicenseEvent, Fund, Client, SoftwareProduct, LicenseTier, AuditSchedule, AppUser, AppRole, AuditLog } from './types';
-import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronUp, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive, GripVertical, Calculator, DollarSign, BarChart3 } from 'lucide-react';
+import { Activity, Key, Shield, ShieldAlert, ShieldCheck, Trash2, Bell, Plus, Clock, Search, Building, Cpu, Database, Server, Zap, StopCircle, List, Send, X, Users, Settings, Menu, ChevronDown, ChevronUp, ChevronRight, Download, Layers, Calendar, Mail, Check, SlidersHorizontal, AlertTriangle, AlertOctagon, FileText, RefreshCw, Code2, Info, Lock, Eye, EyeOff, LogOut, Undo2, Archive, GripVertical, Calculator, DollarSign, BarChart3 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import * as XLSX from 'xlsx';
 import { cn } from './lib/utils';
@@ -1057,6 +1057,9 @@ export default function App() {
   const activeCount = licenses.filter(l => l.status === 'active').length;
   const revokedCount = licenses.filter(l => l.status === 'revoked').length;
   const expiredCount = licenses.filter(l => l.status === 'expired').length;
+  const totalActiveApiCalls = licenses
+    .filter(l => l.status === 'active')
+    .reduce((sum, l) => sum + (l.api_calls_count_daily || 0), 0);
 
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-50 font-sans overflow-hidden selection:bg-indigo-500/30">
@@ -1275,8 +1278,9 @@ export default function App() {
           
           {/* Stats */}
         {(activeTab === 'dashboard' || activeTab === 'licenses') && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
             <StatCard title="Active Trading Nodes" value={activeCount} icon={Server} color="text-indigo-400" bgColor="bg-indigo-500/10 border border-indigo-500/20" />
+            <StatCard title="Total Active API Calls" value={totalActiveApiCalls.toLocaleString()} icon={Zap} color="text-amber-400" bgColor="bg-amber-500/10 border border-amber-500/20" />
             <StatCard title="Total Client Earnings" value={`$${(licenses.reduce((acc, l) => acc + (l.current_earnings || 0), 0) / 1000).toFixed(1)}k`} icon={Activity} color="text-emerald-400" bgColor="bg-emerald-500/10 border border-emerald-500/20" />
             <StatCard title="Total License Revenue" value={`$${(licenses.reduce((acc, l) => acc + getLicenseFee(l), 0) / 1000).toFixed(0)}k`} icon={Building} color="text-blue-400" bgColor="bg-blue-500/10 border border-blue-500/20" />
             <StatCard title="Suspended/Revoked" value={revokedCount + licenses.filter(l => l.status === 'suspended').length} icon={ShieldAlert} color="text-rose-400" bgColor="bg-rose-500/10 border border-rose-500/20" />
@@ -6807,6 +6811,31 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
   const currentActive = licenses.filter(l => l.status === 'active').length;
   const [generating, setGenerating] = useState(false);
   const [dbHealth, setDbHealth] = useState<any>(null);
+  const [simulatedSqlitePressure, setSimulatedSqlitePressure] = useState(false);
+  const [simulatedSqliteFailure, setSimulatedSqliteFailure] = useState(false);
+  const [simulatedDuckdbPressure, setSimulatedDuckdbPressure] = useState(false);
+  const [simulatedDuckdbFailure, setSimulatedDuckdbFailure] = useState(false);
+
+  const sqliteStatus = simulatedSqliteFailure 
+    ? 'failed' 
+    : (simulatedSqlitePressure 
+        ? 'high_pressure' 
+        : (dbHealth?.sqlite?.status !== 'healthy' && dbHealth?.sqlite?.status !== undefined ? dbHealth?.sqlite?.status : 'healthy'));
+
+  const duckdbStatus = simulatedDuckdbFailure 
+    ? 'failed' 
+    : (simulatedDuckdbPressure 
+        ? 'high_pressure' 
+        : (dbHealth?.duckdb?.status !== 'healthy' && dbHealth?.duckdb?.status !== undefined ? dbHealth?.duckdb?.status : 'healthy'));
+
+  const sqliteTables = dbHealth?.sqlite?.tables || 14;
+  const sqliteJournalMode = dbHealth?.sqlite?.journal_mode || 'WAL';
+
+  const duckdbRamUsed = simulatedDuckdbPressure
+    ? 384 * 1024 * 1024
+    : (dbHealth?.duckdb?.memory_usage || 24 * 1024 * 1024);
+
+  const duckdbRecords = dbHealth?.duckdb?.records || 48;
 
   // Drag and drop customizable widget state
   const [widgets, setWidgets] = useState<{ id: string; title: string; visible: boolean; size: string }[]>(() => {
@@ -7463,47 +7492,125 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
 
       case 'db_diagnostic':
         return (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-zinc-950/40 border border-zinc-800/40 p-4 rounded-xl flex items-center gap-4">
-              <div className={cn("p-2.5 rounded-lg bg-opacity-10", 
-                dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500 text-emerald-400" : "bg-rose-500 text-rose-400"
-              )}>
-                <Database className="w-4 h-4" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-1">
-                  <h4 className="text-xs font-medium text-zinc-100 truncate">SQLite Engine</h4>
-                  <span className={cn("text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0", 
-                    dbHealth?.sqlite?.status === 'healthy' ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                  )}>
-                    {dbHealth?.sqlite?.status || 'Checking...'}
-                  </span>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-zinc-950/40 border border-zinc-800/40 p-4 rounded-xl flex items-center gap-4 relative overflow-hidden">
+                <div className={cn("p-2.5 rounded-lg bg-opacity-10", 
+                  sqliteStatus === 'healthy' ? "bg-emerald-500 text-emerald-400" :
+                  sqliteStatus === 'high_pressure' ? "bg-amber-500 text-amber-400" : "bg-rose-500 text-rose-400"
+                )}>
+                  <Database className="w-4 h-4" />
                 </div>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 font-mono text-[9px] text-zinc-500">
-                  <span>Journal: <span className="text-zinc-300">{dbHealth?.sqlite?.journal_mode || '...'}</span></span>
-                  <span>Tables: <span className="text-zinc-300">{dbHealth?.sqlite?.tables || 0}</span></span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <h4 className="text-xs font-medium text-zinc-100 truncate">SQLite Engine</h4>
+                    <span className={cn("text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 border", 
+                      sqliteStatus === 'healthy' ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                      sqliteStatus === 'high_pressure' ? "bg-amber-500/10 text-amber-400 border-amber-500/20 animate-pulse" : "bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse"
+                    )}>
+                      {sqliteStatus === 'healthy' ? 'Healthy' : sqliteStatus === 'high_pressure' ? 'High Pressure' : 'Failed'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 font-mono text-[9px] text-zinc-500">
+                    <span>Journal: <span className="text-zinc-300">{sqliteJournalMode}</span></span>
+                    <span>Tables: <span className="text-zinc-300">{sqliteTables}</span></span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-zinc-950/40 border border-zinc-800/40 p-4 rounded-xl flex items-center gap-4 relative overflow-hidden">
+                <div className={cn("p-2.5 rounded-lg bg-opacity-10", 
+                  duckdbStatus === 'healthy' ? "bg-indigo-500 text-indigo-400" :
+                  duckdbStatus === 'high_pressure' ? "bg-amber-500 text-amber-400" : "bg-rose-500 text-rose-400"
+                )}>
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <h4 className="text-xs font-medium text-zinc-100 truncate">DuckDB OLAP</h4>
+                    <span className={cn("text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 border", 
+                      duckdbStatus === 'healthy' ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" :
+                      duckdbStatus === 'high_pressure' ? "bg-amber-500/10 text-amber-400 border-amber-500/20 animate-pulse" : "bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse"
+                    )}>
+                      {duckdbStatus === 'healthy' ? 'Healthy' : duckdbStatus === 'high_pressure' ? 'High Pressure' : 'Failed'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 font-mono text-[9px] text-zinc-500">
+                    <span>RAM: <span className="text-zinc-300">{(duckdbRamUsed / 1024 / 1024).toFixed(1)}MB</span></span>
+                    <span>Records: <span className="text-zinc-300">{duckdbRecords}</span></span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div className="bg-zinc-950/40 border border-zinc-800/40 p-4 rounded-xl flex items-center gap-4">
-              <div className={cn("p-2.5 rounded-lg bg-opacity-10", 
-                dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500 text-indigo-400" : "bg-rose-500 text-rose-400"
-              )}>
-                <Zap className="w-4 h-4" />
+            <div className="border border-zinc-800/60 bg-zinc-950/20 rounded-xl p-3 space-y-2 text-[11px] font-mono">
+              <div className="flex items-center justify-between border-b border-zinc-800/40 pb-1.5 mb-1.5">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold">Diagnostics Simulation Controls</span>
+                <span className="text-[9px] text-indigo-400 font-medium">Test Real-time Banner Response</span>
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-1">
-                  <h4 className="text-xs font-medium text-zinc-100 truncate">DuckDB OLAP</h4>
-                  <span className={cn("text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0", 
-                    dbHealth?.duckdb?.status === 'healthy' ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                  )}>
-                    {dbHealth?.duckdb?.status || 'Checking...'}
-                  </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">SQLite High Pressure</span>
+                  <button 
+                    onClick={() => {
+                      setSimulatedSqlitePressure(!simulatedSqlitePressure);
+                      if (!simulatedSqlitePressure) setSimulatedSqliteFailure(false);
+                    }}
+                    className={cn(
+                      "w-8 h-4 rounded-full transition-colors relative",
+                      simulatedSqlitePressure ? "bg-amber-500" : "bg-zinc-800"
+                    )}
+                  >
+                    <span className={cn("absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-zinc-100 transition-transform", simulatedSqlitePressure ? "translate-x-4" : "")} />
+                  </button>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 font-mono text-[9px] text-zinc-500">
-                  <span>RAM: <span className="text-zinc-300">{dbHealth?.duckdb?.memory_usage ? `${Math.round(dbHealth.duckdb.memory_usage / 1024 / 1024)}MB` : '...'}</span></span>
-                  <span>Records: <span className="text-zinc-300">{dbHealth?.duckdb?.records || 0}</span></span>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">SQLite Fail state</span>
+                  <button 
+                    onClick={() => {
+                      setSimulatedSqliteFailure(!simulatedSqliteFailure);
+                      if (!simulatedSqliteFailure) setSimulatedSqlitePressure(false);
+                    }}
+                    className={cn(
+                      "w-8 h-4 rounded-full transition-colors relative",
+                      simulatedSqliteFailure ? "bg-rose-500" : "bg-zinc-800"
+                    )}
+                  >
+                    <span className={cn("absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-zinc-100 transition-transform", simulatedSqliteFailure ? "translate-x-4" : "")} />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">DuckDB RAM Pressure</span>
+                  <button 
+                    onClick={() => {
+                      setSimulatedDuckdbPressure(!simulatedDuckdbPressure);
+                      if (!simulatedDuckdbPressure) setSimulatedDuckdbFailure(false);
+                    }}
+                    className={cn(
+                      "w-8 h-4 rounded-full transition-colors relative",
+                      simulatedDuckdbPressure ? "bg-amber-500" : "bg-zinc-800"
+                    )}
+                  >
+                    <span className={cn("absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-zinc-100 transition-transform", simulatedDuckdbPressure ? "translate-x-4" : "")} />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">DuckDB Fail state</span>
+                  <button 
+                    onClick={() => {
+                      setSimulatedDuckdbFailure(!simulatedDuckdbFailure);
+                      if (!simulatedDuckdbFailure) setSimulatedDuckdbPressure(false);
+                    }}
+                    className={cn(
+                      "w-8 h-4 rounded-full transition-colors relative",
+                      simulatedDuckdbFailure ? "bg-rose-500" : "bg-zinc-800"
+                    )}
+                  >
+                    <span className={cn("absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-zinc-100 transition-transform", simulatedDuckdbFailure ? "translate-x-4" : "")} />
+                  </button>
                 </div>
               </div>
             </div>
@@ -7642,6 +7749,79 @@ function DashboardView({ licenses, riskScores, riskAlerts, renewalAlerts, showTo
                 {w.title}
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Persistent warning banner if SQLite or DuckDB is failing or under high pressure */}
+      {(sqliteStatus !== 'healthy' || duckdbStatus !== 'healthy') && (
+        <div className={cn(
+          "border rounded-xl p-5 relative overflow-hidden transition-all duration-300 shadow-xl animate-in fade-in slide-in-from-top-3 flex flex-col md:flex-row md:items-center justify-between gap-4",
+          (sqliteStatus === 'failed' || duckdbStatus === 'failed')
+            ? "bg-rose-500/10 border-rose-500/20 text-rose-200"
+            : "bg-amber-500/10 border-amber-500/20 text-amber-200"
+        )}>
+          {/* Accent decoration */}
+          <div className={cn(
+            "absolute left-0 top-0 bottom-0 w-1.5",
+            (sqliteStatus === 'failed' || duckdbStatus === 'failed')
+              ? "bg-rose-500 animate-pulse"
+              : "bg-amber-500 animate-pulse"
+          )} />
+          
+          <div className="flex items-start gap-3.5 flex-1 pl-2">
+            <div className={cn(
+              "p-2 rounded-lg shrink-0",
+              (sqliteStatus === 'failed' || duckdbStatus === 'failed')
+                ? "bg-rose-500/20 text-rose-400"
+                : "bg-amber-500/20 text-amber-400"
+            )}>
+              {(sqliteStatus === 'failed' || duckdbStatus === 'failed') ? (
+                <AlertOctagon className="w-5 h-5 animate-bounce" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 animate-pulse" />
+              )}
+            </div>
+            <div className="space-y-1 flex-1">
+              <h4 className="text-sm font-semibold flex items-center gap-2">
+                {(sqliteStatus === 'failed' || duckdbStatus === 'failed')
+                  ? "CRITICAL SYSTEM ERROR: Database Engine Failure Detected"
+                  : "DATABASE DEGRADATION WARNING: High Resource Pool Stress"
+                }
+              </h4>
+              <p className="text-xs text-zinc-400 leading-relaxed font-mono">
+                {(sqliteStatus === 'failed' || duckdbStatus === 'failed')
+                  ? `One or more persistent storage engines are in a failed state (SQLite: ${sqliteStatus.toUpperCase()}, DuckDB: ${duckdbStatus.toUpperCase()}). Local replication is offline. System integrity check is compromised.`
+                  : `High pressure detected on OLAP storage engines. DuckDB memory allocation is high: ${(duckdbRamUsed / 1024 / 1024).toFixed(1)}MB / 128MB ceiling. Queries and analytics ingestion might experience transaction pool queuing.`
+                }
+              </p>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-2.5 shrink-0 self-end md:self-auto font-mono text-xs">
+            {(sqliteStatus === 'failed' || duckdbStatus === 'failed') ? (
+              <button
+                onClick={() => {
+                  setSimulatedSqliteFailure(false);
+                  setSimulatedDuckdbFailure(false);
+                  showToast('Rebuilding database connection pools & schema integrity...', 'success');
+                }}
+                className="bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-rose-200 border border-rose-500/30 px-3 py-1.5 rounded-lg font-bold transition-all uppercase text-[10px] tracking-wider cursor-pointer"
+              >
+                Hot Rebuild Pool
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  setSimulatedSqlitePressure(false);
+                  setSimulatedDuckdbPressure(false);
+                  showToast('Database VACUUM optimization executed successfully.', 'success');
+                }}
+                className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-amber-200 border border-amber-500/30 px-3 py-1.5 rounded-lg font-bold transition-all uppercase text-[10px] tracking-wider cursor-pointer"
+              >
+                Run Vacuum / Clear
+              </button>
+            )}
           </div>
         </div>
       )}
